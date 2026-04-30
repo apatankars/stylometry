@@ -1,0 +1,57 @@
+# Base config — shared defaults for all experiments.
+# Experiment files only need to override what differs from these values.
+
+encoder:
+  name: hf
+  model_name_or_path: roberta-base
+  pooling: mean
+  lora: null
+  freeze_backbone: true
+  max_length: 512
+
+loss:
+  name: supcon
+  temperature: 0.07
+  margin: 0.3
+  mining: batch_hard
+
+head:
+  name: prototypical
+  distance: cosine
+  shrinkage: ledoit_wolf
+
+data:
+  dataset: enron
+  train_senders: 100
+  emails_per_sender_k: 16
+  val_split: 0.1
+  preprocessing:
+    strip_quoted: true
+    strip_signatures: true
+    entity_masking: false
+    fix_encoding: true
+    min_body_chars: 50
+    max_body_chars: 4000
+
+training:
+  epochs: 10
+  batch_size: 64
+  lr: 2.0e-5
+  scheduler: cosine
+  warmup_steps: 100
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  project: email-fraud-detection
+  entity: null
+  tags: []
+  notes: ""
+
+runpod: null
+
+confidence_tiers:
+  "1-4": low
+  "5-9": medium
+  "10-24": high
+  "25+": very_high

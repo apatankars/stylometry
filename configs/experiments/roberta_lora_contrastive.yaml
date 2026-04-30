@@ -1,0 +1,54 @@
+# RoBERTa-base fine-tuned with LoRA + Pairwise Contrastive Loss (Hadsell 2006).
+#
+# ContrastiveLoss operates on pairs rather than triplets or multi-positive sets.
+# Uses semi-hard negative mining: only negatives inside the margin but farther
+# than the hardest positive are kept, avoiding trivial gradients.
+#
+# Run with:
+#   python scripts/train.py --config configs/experiments/roberta_lora_contrastive.yaml
+
+encoder:
+  name: hf
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: false
+  max_length: 512
+  projection_dim: null
+  lora:
+    r: 16
+    alpha: 32
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+
+loss:
+  name: contrastive
+  margin: 1.0               # L2 distance margin; with unit-normed vectors max dist=2
+  mining: semi_hard
+
+data:
+  dataset: enron
+  train_senders: 120
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 2.0e-4
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  project: email-fraud-detection
+  tags:
+    - roberta-base
+    - lora
+    - contrastive
+    - semi-hard
+    - sft
+  notes: "RoBERTa-base + LoRA (r=16) fine-tuned on Enron with pairwise ContrastiveLoss (semi-hard mining)."

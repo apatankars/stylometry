@@ -1,0 +1,52 @@
+# Frozen all-mpnet-base-v2 baseline + trainable projection head.
+#
+# all-mpnet-base-v2 is trained on 1B sentence pairs with multiple-negatives
+# ranking loss — it produces considerably stronger zero-shot sentence embeddings
+# than raw RoBERTa.  This config tests whether that sentence-level pre-training
+# already gives good stylometric structure without any domain fine-tuning.
+#
+# NOTE: MPNet attention layers use different module names ("q", "k", "v", "o")
+# not ("query", "key", "value").  If you later want LoRA on this model use:
+#   target_modules: [q, v]
+#
+# Run with:
+#   python scripts/train.py --config configs/experiments/mpnet_frozen.yaml
+
+encoder:
+  name: hf
+  model_name_or_path: sentence-transformers/all-mpnet-base-v2
+  pooling: mean
+  freeze_backbone: true
+  lora: null
+  max_length: 512
+  projection_dim: 128
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  dataset: enron
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 10
+  batch_size: 64
+  lr: 1.0e-3
+  scheduler: cosine
+  warmup_steps: 50
+  grad_clip: 1.0
+  mixed_precision: false
+
+wandb:
+  project: email-fraud-detection
+  tags:
+    - mpnet
+    - frozen
+    - projection
+    - supcon
+    - baseline
+  notes: "Frozen all-mpnet-base-v2 + linear projection. Strong sentence-embedding baseline."

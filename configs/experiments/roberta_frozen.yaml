@@ -1,0 +1,47 @@
+# Frozen RoBERTa-base baseline + trainable projection head.
+#
+# The backbone weights are entirely frozen; only the 768→128 linear projection
+# is trained.  This measures how much structure pre-trained RoBERTa embeddings
+# already have for authorship attribution, with a minimal supervised alignment.
+#
+# Run with:
+#   python scripts/train.py --config configs/experiments/roberta_frozen.yaml
+
+encoder:
+  name: hf
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: true
+  lora: null
+  max_length: 512
+  projection_dim: 128       # only this linear layer is trained
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  dataset: enron
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 10
+  batch_size: 64            # P=8 senders × K=8 emails
+  lr: 1.0e-3                # higher LR — only training a linear layer
+  scheduler: cosine
+  warmup_steps: 50
+  grad_clip: 1.0
+  mixed_precision: false    # no benefit without heavy GPU compute
+
+wandb:
+  project: email-fraud-detection
+  tags:
+    - roberta-base
+    - frozen
+    - projection
+    - supcon
+    - baseline
+  notes: "Frozen RoBERTa-base + linear projection head. Baseline to measure pre-trained embedding quality."

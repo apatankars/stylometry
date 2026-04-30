@@ -1,0 +1,64 @@
+# LUAR-MUD experiment on the Enron corpus.
+#
+# Rivera et al. "Learning Universal Authorship Representations" EMNLP 2021
+# Model: https://huggingface.co/rrivera1849/LUAR-MUD
+#
+# Run with:
+#   python scripts/train.py --config configs/experiments/example_luar.yaml
+
+encoder:
+  name: hf
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode       # episode-level mean-pool over K emails
+  freeze_backbone: false      # fine-tune with LoRA
+  max_length: 512
+  lora:
+    r: 8
+    alpha: 16
+    target_modules:
+      - query
+      - value
+    dropout: 0.1
+
+loss:
+  name: supcon
+  temperature: 0.1            # Khosla et al. recommend 0.07–0.1
+
+head:
+  name: prototypical
+  distance: cosine
+
+data:
+  dataset: enron
+  train_senders: 150          # use 150 of the ~180 Enron senders for train
+  emails_per_sender_k: 16     # K=16 per episode (matches LUAR paper)
+  val_split: 0.1
+  preprocessing:
+    strip_quoted: true
+    strip_signatures: true
+    entity_masking: false     # keep names for style signal
+
+training:
+  epochs: 20
+  batch_size: 64              # P=4 senders × K=16 emails = 64
+  lr: 5.0e-5
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  project: email-fraud-detection
+  entity: null
+  tags:
+    - luar
+    - enron
+    - supcon
+    - lora
+  notes: "LUAR-MUD fine-tuned on Enron with SupCon + LoRA, episode pooling."
+
+confidence_tiers:
+  "1-4": low
+  "5-9": medium
+  "10-24": high
+  "25+": very_high
