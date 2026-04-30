@@ -15,7 +15,7 @@ Processed/tokenised splits go under `data/processed/<dataset-name>/` (also gitig
 **Download:**
 ```bash
 curl -O https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz
-tar -xzf enron_mail_20150507.tar.gz -C data/raw/enron/
+tar --no-same-owner -xzf enron_mail_20150507.tar.gz -C data/raw/enron/
 ```
 
 **Expected structure:**

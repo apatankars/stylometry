@@ -28,6 +28,7 @@ TARBALL="$DATA_DIR/enron_mail_20150507.tar.gz"
 MAILDIR="$DATA_DIR/maildir"
 PROCESSED_DIR="$DATA_ROOT/data/processed/enron_dryrun"
 ENRON_URL="https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz"
+EXTRACT_CHECKPOINT="${EXTRACT_CHECKPOINT:-10000}"
 
 SKIP_DOWNLOAD=false
 for arg in "$@"; do
@@ -62,7 +63,22 @@ if [[ -d "$MAILDIR" ]]; then
   echo "[skip] maildir/ already extracted."
 elif [[ -f "$TARBALL" ]]; then
   echo "[2/4] Extracting tarball …"
-  tar -xzf "$TARBALL" -C "$DATA_DIR/"
+  # Archive ownership is not needed for preprocessing and may fail in containers.
+  if command -v pigz >/dev/null 2>&1; then
+    PIGZ_THREADS="${PIGZ_THREADS:-$(nproc 2>/dev/null || echo 4)}"
+    echo "      Using pigz with $PIGZ_THREADS threads."
+    pigz -dc -p "$PIGZ_THREADS" "$TARBALL" | \
+      tar --no-same-owner \
+          --checkpoint="$EXTRACT_CHECKPOINT" \
+          --checkpoint-action="echo=      tar checkpoint %u" \
+          -xf - -C "$DATA_DIR/"
+  else
+    echo "      Using standard gzip decompression."
+    tar --no-same-owner \
+        --checkpoint="$EXTRACT_CHECKPOINT" \
+        --checkpoint-action="echo=      tar checkpoint %u" \
+        -xzf "$TARBALL" -C "$DATA_DIR/"
+  fi
   echo "      Done: $MAILDIR"
 else
   echo "ERROR: No tarball found at $TARBALL and maildir/ does not exist."

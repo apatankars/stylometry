@@ -159,7 +159,7 @@ def _collect_enron_paths(
             f"Maildir not found: {root}\n"
             "Download Enron with:\n"
             "  curl -L -O https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz\n"
-            "  tar -xzf enron_mail_20150507.tar.gz -C data/raw/enron/"
+            "  tar --no-same-owner -xzf enron_mail_20150507.tar.gz -C data/raw/enron/"
         )
 
     items: list[tuple[str, str, str]] = []
