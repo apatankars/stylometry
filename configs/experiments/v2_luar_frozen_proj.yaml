@@ -23,6 +23,7 @@ encoder:
   max_length: 512
   projection_dim: 128
   episode_k: 4             # 4 emails per episode; 8 emails/sender → 2 episodes/sender
+  trust_remote_code: true  # LUAR-MUD uses a custom LuarModel class not in base transformers
 
 loss:
   name: supcon

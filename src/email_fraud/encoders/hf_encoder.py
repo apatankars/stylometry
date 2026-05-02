@@ -49,9 +49,15 @@ class HFEncoder(BaseEncoder):
         self.config = config
         # Tokenizer is stored on the encoder so tokenize() and encode() are
         # always paired — prevents train/serve skew from using different tokenizers.
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.model_name_or_path,
+            trust_remote_code=config.trust_remote_code,
+        )
 
-        backbone = AutoModel.from_pretrained(config.model_name_or_path)
+        backbone = AutoModel.from_pretrained(
+            config.model_name_or_path,
+            trust_remote_code=config.trust_remote_code,
+        )
 
         if config.lora is not None:
             # LoRA inserts low-rank adapter matrices into the attention layers.
