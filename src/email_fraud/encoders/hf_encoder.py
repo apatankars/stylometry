@@ -27,6 +27,31 @@ from email_fraud.encoders.base import BaseEncoder
 from email_fraud.registry import register
 
 
+class _LUARPeftAdapter(nn.Module):
+    """Wraps LUAR before LoRA is applied so PEFT's injected inputs_embeds kwarg is absorbed.
+
+    PEFT's PeftModelForFeatureExtraction.forward always passes inputs_embeds=None
+    to the base model, but LUAR.forward() only accepts (input_ids, attention_mask,
+    output_attentions, document_batch_size). This adapter sits between PEFT and LUAR,
+    absorbing the extra kwarg. LoRA target modules are still found because PEFT
+    scans named_modules() which reaches through _luar.
+    """
+
+    def __init__(self, luar_model: nn.Module) -> None:
+        super().__init__()
+        self._luar = luar_model
+        self.config = luar_model.config
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        return self._luar(input_ids=input_ids, attention_mask=attention_mask)
+
+
 @register("encoder", "hf")
 class HFEncoder(BaseEncoder):
     """HuggingFace AutoModel encoder with optional LoRA fine-tuning.
@@ -49,9 +74,21 @@ class HFEncoder(BaseEncoder):
         self.config = config
         # Tokenizer is stored on the encoder so tokenize() and encode() are
         # always paired — prevents train/serve skew from using different tokenizers.
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.model_name_or_path, trust_remote_code=True
+        )
 
-        backbone = AutoModel.from_pretrained(config.model_name_or_path)
+        backbone = AutoModel.from_pretrained(
+            config.model_name_or_path,
+            trust_remote_code=True,
+            low_cpu_mem_usage=False,
+        )
+        # Transformers 5.x promotes non-persistent buffers from meta→device via
+        # torch.empty_like (uninitialized). Re-zero any token_type_ids buffers,
+        # which must be all-zeros for correct RoBERTa-family inference.
+        for module in backbone.modules():
+            if hasattr(module, "token_type_ids") and isinstance(module.token_type_ids, torch.Tensor):
+                module.token_type_ids.zero_()
 
         if config.lora is not None:
             # LoRA inserts low-rank adapter matrices into the attention layers.
@@ -59,6 +96,12 @@ class HFEncoder(BaseEncoder):
             # trainable; the original backbone weights are frozen.  This lets
             # us fine-tune a 125M-param RoBERTa with ~0.3% of the parameters.
             from peft import LoraConfig, TaskType, get_peft_model
+
+            # LUAR's forward() doesn't accept inputs_embeds, which PEFT's
+            # PeftModelForFeatureExtraction injects unconditionally. Wrap before
+            # get_peft_model so the adapter (not LUAR) absorbs that kwarg.
+            if config.pooling == "luar_episode":
+                backbone = _LUARPeftAdapter(backbone)
 
             lora_cfg = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION,
@@ -78,9 +121,8 @@ class HFEncoder(BaseEncoder):
                 param.requires_grad = False
 
         self.backbone = backbone
-        # hidden_size is the token-level output dimension of the transformer
-        # (e.g. 768 for roberta-base, 1024 for roberta-large).
-        backbone_dim: int = backbone.config.hidden_size
+        # LUAR uses embedding_size; standard transformers use hidden_size.
+        backbone_dim: int = getattr(backbone.config, "hidden_size", None) or getattr(backbone.config, "embedding_size")
 
         # Optional trainable projection head (useful for frozen-backbone experiments)
         # Projects from backbone_dim → projection_dim before L2 normalization.
@@ -222,33 +264,15 @@ class HFEncoder(BaseEncoder):
     ) -> torch.Tensor:
         """LUAR-style episode pooling: (B, K, L) → (B, d).
 
-        LUAR (Rivera et al. 2021) encodes an "episode" of K emails from the same
-        author jointly, then mean-pools over the episode dimension to produce a
-        single author-level embedding.  This lets the model leverage cross-email
-        consistency signals that a single-email encoder cannot see.
-
-        Steps:
-          1. Flatten (B, K, L) → (B*K, L) to run the backbone once.
-          2. Mean-pool tokens → (B*K, d) per-email embeddings.
-          3. Reshape back to (B, K, d) and mean-pool the K episode dimension.
-          4. Project + L2-normalize to (B, d).
+        LUAR (Rivera et al. 2021) encodes an "episode" of K emails jointly.
+        The full LUAR model expects (B, K, L) input and returns (B, embedding_dim)
+        directly — its own attention + max-pool episode aggregation is used.
         """
-        # TODO: full LUAR episode pooling — Rivera et al. arXiv:2107.10882
-        b, k, seq_len = input_ids.shape
-        # Collapse batch and episode dims so the backbone sees a flat batch.
-        flat_ids = input_ids.view(b * k, seq_len)
-        flat_mask = attention_mask.view(b * k, seq_len)
-
-        outputs = self.backbone(
-            input_ids=flat_ids,
-            attention_mask=flat_mask,
-            **kwargs,
+        # Pass the full episode tensor to LUAR; it returns a plain (B, d) tensor.
+        episode_embs = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
         )
-        token_embs = outputs.last_hidden_state        # (B*K, L, d)
-        # Per-email embedding via token mean-pool
-        email_embs = self._mean_pool(token_embs, flat_mask)  # (B*K, d)
-        # Average over the K-episode dim to get one vector per author episode
-        episode_embs = email_embs.view(b, k, -1).mean(dim=1)  # (B, d)
         if self.projection is not None:
             episode_embs = self.projection(episode_embs)
         return F.normalize(episode_embs, p=2, dim=-1)

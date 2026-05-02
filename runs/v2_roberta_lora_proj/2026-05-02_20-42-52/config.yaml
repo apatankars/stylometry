@@ -1,0 +1,51 @@
+# V2 Ablation 3/6 — RoBERTa + LoRA + projection head (SupCon)
+#
+# Adds LoRA adapters (r=16, ~1.2M trainable params) on top of frozen RoBERTa,
+# plus the 768→128 projection head.  The projection head prevents the
+# dimensional collapse seen in the v1 roberta_lora_triplet run (no proj head).
+#
+# LoRA parameter budget (r=16, targeting query+value in 12 layers):
+#   12 × 2 × 2 × (768×16 + 16×768) ≈ 1.2M trainable / 125M total (~1%)
+
+encoder:
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: false
+  lora:
+    r: 16
+    alpha: 32             # effective scale = alpha/r = 2 (standard)
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 2.0e-4              # standard LoRA LR; lower than frozen-head LR to protect pretrained weights
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v2_roberta_lora_proj
+  tags:
+    - roberta-base
+    - lora
+    - projection
+    - supcon
+    - v2-ablation
+  notes: "V2 ablation: RoBERTa + LoRA (r=16) + 768→128 projection. Tests adapter fine-tuning over frozen baseline."

@@ -201,8 +201,8 @@ class Trainer:
                     import subprocess
                     import sys
 
-                    # project root is four parents up from this file (src/email_fraud/training)
-                    project_root = Path(__file__).resolve().parents[4]
+                    # project root is three parents up from this file (src/email_fraud/training)
+                    project_root = Path(__file__).resolve().parents[3]
                     eval_script = project_root / "scripts" / "evaluate.py"
                     checkpoint_path = self.output_dir / "checkpoint_last.pt"
                     cmd = [
@@ -397,7 +397,7 @@ class Trainer:
                 all_labels.extend(batch_labels.cpu().tolist())
 
         metrics: dict[str, float] = {"val/loss": total_loss / max(n_batches, 1)}
-        if len(all_embs) > 1:
+        if all_embs:
             embs = torch.cat(all_embs, dim=0)
             labels_t = torch.tensor(all_labels)
             metrics.update(self._compute_embedding_metrics(embs, labels_t))

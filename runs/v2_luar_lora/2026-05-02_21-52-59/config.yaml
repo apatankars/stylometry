@@ -1,0 +1,55 @@
+# V2 Ablation 6/6 — LUAR + LoRA + projection head (SupCon, episode pooling)
+#
+# Full fine-tuning via LoRA of LUAR-MUD with episode pooling.  This is the
+# highest-capacity experiment: both the adapter weights (~0.5M) and the
+# projection head (~65K) are trained while the backbone (174M) stays frozen.
+#
+# LUAR-MUD is RoBERTa-based internally, so LoRA target modules are "query"
+# and "value" (same as roberta-base experiments, not "q"/"v" like MPNet).
+#
+# Episode structure: same as v2_luar_frozen_proj (episode_k=4, K=8 → 2 ep/sender).
+
+encoder:
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode
+  freeze_backbone: false
+  lora:
+    r: 16
+    alpha: 32
+    target_modules:
+      - query               # LUAR-MUD is RoBERTa-based, uses "query"/"value"
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+  episode_k: 4
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 2.0e-4
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v2_luar_lora
+  tags:
+    - luar
+    - lora
+    - projection
+    - supcon
+    - episode-pooling
+    - v2-ablation
+  notes: "V2 ablation: LUAR-MUD + LoRA (r=16) + projection. Full fine-tuning of episode-pooling encoder."

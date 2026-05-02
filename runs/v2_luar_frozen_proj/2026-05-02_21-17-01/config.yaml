@@ -1,0 +1,55 @@
+# V2 Ablation 5/6 — LUAR frozen + projection head (SupCon, episode pooling)
+#
+# LUAR-MUD (Rivera et al. EMNLP 2021) encodes K emails jointly as an "episode"
+# and mean-pools them into a single author-level representation.  The backbone
+# is frozen; only the 512→128 projection head is trained.
+#
+# Episode structure with K=8 and episode_k=4:
+#   - PKSampler yields P=8 senders × K=8 emails = 64 texts per batch
+#   - Encoder reshapes (64, L) → (16, 4, L) and mean-pools each group of 4
+#   - Output: 16 episode embeddings (2 per sender) for SupCon
+#   - SupCon sees 2 positives per anchor — sufficient contrastive signal
+#
+# Compared to single-email experiments (1-5): each embedding here aggregates
+# 4 emails, so the representation captures cross-email stylometric consistency.
+#
+# LUAR-MUD hidden size: 512 (not 768 like RoBERTa-base).
+
+encoder:
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode
+  freeze_backbone: true
+  lora: null
+  max_length: 512
+  projection_dim: 128
+  episode_k: 4             # 4 emails per episode; 8 emails/sender → 2 episodes/sender
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8   # must be divisible by episode_k (8 / 4 = 2 episodes)
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 1.0e-3
+  scheduler: cosine
+  warmup_steps: 50
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v2_luar_frozen_proj
+  tags:
+    - luar
+    - frozen
+    - projection
+    - supcon
+    - episode-pooling
+    - v2-ablation
+  notes: "V2 ablation: frozen LUAR-MUD + projection. Tests episode-level authorship representation vs. single-email encoders."

@@ -1,0 +1,42 @@
+# V2 Ablation 1/6 — RoBERTa frozen + projection head (SupCon)
+#
+# Backbone is a fixed feature extractor; only the 768→128 linear projection
+# is trained (~98K params).  Establishes how much authorship structure
+# RoBERTa's pretrained representations already contain.
+
+encoder:
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: true
+  lora: null
+  max_length: 512
+  projection_dim: 128
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8   # P=8 senders × K=8 emails = 64 per batch
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 1.0e-3                # high LR is appropriate when only training a linear layer
+  scheduler: cosine
+  warmup_steps: 50
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v2_roberta_frozen_proj
+  tags:
+    - roberta-base
+    - frozen
+    - projection
+    - supcon
+    - v2-ablation
+  notes: "V2 ablation: frozen RoBERTa + 768→128 projection. Baseline for pretrained authorship signal."

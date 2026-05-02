@@ -24,6 +24,7 @@ import argparse
 import logging
 import shutil
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -192,10 +193,16 @@ def _run_training(cfg, EncoderClass, LossClass, HeadClass, args, output_dir: Pat
     # Use PKSampler for val too; a plain DataLoader would interleave senders
     # and break the label-reduction stride (labels[::episode_k]).
     if cfg.encoder.pooling == "luar_episode":
+        # Val/test splits are sender-disjoint and smaller, so fewer senders may
+        # qualify with >= k emails.  Cap val_p to however many are eligible.
+        k = cfg.data.emails_per_sender_k
+        val_counts = Counter(val_dataset.sender_ids)
+        val_eligible = sum(1 for c in val_counts.values() if c >= k)
+        val_p = max(2, min(p, val_eligible))
         val_sampler = PKSampler(
             sender_ids=val_dataset.sender_ids,
-            p=p,
-            k=cfg.data.emails_per_sender_k,
+            p=val_p,
+            k=k,
             seed=1,
         )
         val_loader = DataLoader(
