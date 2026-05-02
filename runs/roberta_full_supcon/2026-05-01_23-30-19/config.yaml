@@ -1,0 +1,46 @@
+# RoBERTa-base fully fine-tuned (no LoRA) + Supervised Contrastive Loss.
+#
+# All backbone weights are trainable — no adapters, no freezing.
+# This is useful as a baseline before adding LoRA to confirm the
+# training pipeline works end-to-end with a standard fine-tuning setup.
+#
+# Run with:
+#   python scripts/train.py --config configs/experiments/roberta_full_supcon.yaml
+
+encoder:
+  name: hf
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: false
+  lora: null
+  max_length: 512
+  projection_dim: null
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  dataset: enron
+  train_senders: 44
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 10
+  batch_size: 64            # P=8 senders × K=8 emails
+  lr: 2.0e-5                # standard BERT/RoBERTa full fine-tuning LR
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  project: email-fraud-detection
+  tags:
+    - roberta-base
+    - full-finetune
+    - supcon
+    - no-lora
+  notes: "RoBERTa-base fully fine-tuned on Enron with SupCon loss. Baseline before LoRA."

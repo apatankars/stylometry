@@ -95,6 +95,11 @@ def main() -> None:
     cfg = load_config(str(config_path))
     log_config(cfg)
 
+    # Default run name to the config file stem (e.g. "roberta_lora_triplet")
+    # so W&B shows a meaningful name instead of an auto-generated one.
+    if cfg.wandb.name is None:
+        cfg.wandb.name = config_path.stem
+
     output_dir = _resolve_output_dir(args, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,7 +203,7 @@ def _run_training(cfg, EncoderClass, LossClass, HeadClass, args, output_dir: Pat
         output_dir=output_dir,
         resume_from=args.resume,
         device=device,
-        eval_config_path=config_path,
+        eval_config_path=Path(args.config).resolve(),
         eval_data_dir=cfg.data.processed_dir,
     )
     trainer.train(train_loader, val_loader)

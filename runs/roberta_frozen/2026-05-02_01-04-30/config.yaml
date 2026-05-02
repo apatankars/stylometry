@@ -38,7 +38,6 @@ training:
 
 wandb:
   project: email-fraud-detection
-  name: roberta_frozen
   tags:
     - roberta-base
     - frozen

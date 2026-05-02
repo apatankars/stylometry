@@ -109,8 +109,6 @@ class PKSampler(Sampler[list[int]]):
             yield indices
 
     def __len__(self) -> int:
-        # Total number of dataset items yielded across all batches in one epoch.
-        # Note: this is NOT the number of batches; it's what DataLoader uses to
-        # compute len(dataloader) = len(sampler) // (P*K).
-        n_eligible = len(self._eligible_senders)
-        return (n_eligible // self.p) * self.p * self.k
+        # Number of P×K batches yielded per epoch.
+        # With a batch_sampler, DataLoader uses this directly as len(dataloader).
+        return len(self._eligible_senders) // self.p

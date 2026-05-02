@@ -46,7 +46,6 @@ training:
 
 wandb:
   project: email-fraud-detection
-  name: roberta_lora_triplet
   tags:
     - roberta-base
     - lora

@@ -44,7 +44,7 @@ training:
 
 wandb:
   project: email-fraud-detection
-  entity: null
+  entity: brown-university-deep-learning
   tags: []
   notes: ""
 

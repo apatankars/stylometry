@@ -191,6 +191,7 @@ class WandbConfig(BaseModel):
 
     project: str = "email-fraud-detection"
     entity: str | None = None   # wandb team / username; None = personal workspace
+    name: str | None = None     # human-readable run name shown in W&B dashboard
     tags: list[str] = Field(default_factory=list)
     notes: str = ""
 

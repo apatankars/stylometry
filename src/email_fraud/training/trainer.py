@@ -134,6 +134,7 @@ class Trainer:
         run = wandb.init(
             project=self.wandb_config.project,
             entity=self.wandb_config.entity,
+            name=self.wandb_config.name,
             tags=self.wandb_config.tags,
             notes=self.wandb_config.notes,
             dir=str(self.output_dir),
@@ -157,8 +158,9 @@ class Trainer:
                 train_loss = self._train_epoch(train_loader, scheduler)
                 val_metrics = self._validate(val_loader)
                 val_loss = val_metrics.get("val/loss", float("inf"))
+                current_lr = self.optimizer.param_groups[0]["lr"]
 
-                wandb.log({"epoch": epoch, "train/loss": train_loss, **val_metrics})
+                wandb.log({"epoch": epoch, "train/loss": train_loss, "train/lr": current_lr, **val_metrics})
                 logger.info(
                     "Epoch %d/%d  train/loss=%.4f  %s",
                     epoch,
@@ -359,12 +361,14 @@ class Trainer:
         return total_loss / max(n_batches, 1)
 
     def _validate(self, loader: DataLoader) -> dict[str, float]:
-        """Compute validation contrastive loss over the full val set."""
+        """Compute val loss and embedding-space classification metrics."""
         self.model.eval()
         total_loss = 0.0
         n_batches = 0
+        all_embs: list[torch.Tensor] = []
+        all_labels: list[int] = []
 
-        with torch.no_grad():  # disable grad tracking to save memory and speed up
+        with torch.no_grad():
             for batch in tqdm(loader, desc="val", leave=False):
                 texts: list[str] = batch.texts
                 labels: torch.Tensor = batch.labels.to(self.device)
@@ -377,7 +381,55 @@ class Trainer:
                 total_loss += loss.item()
                 n_batches += 1
 
-        return {"val/loss": total_loss / max(n_batches, 1)}
+                all_embs.append(embeddings.detach().cpu())
+                all_labels.extend(labels.cpu().tolist())
+
+        metrics: dict[str, float] = {"val/loss": total_loss / max(n_batches, 1)}
+        if len(all_embs) > 1:
+            embs = torch.cat(all_embs, dim=0)
+            labels_t = torch.tensor(all_labels)
+            metrics.update(self._compute_embedding_metrics(embs, labels_t))
+        return metrics
+
+    def _compute_embedding_metrics(
+        self, embs: torch.Tensor, labels: torch.Tensor
+    ) -> dict[str, float]:
+        """1-NN accuracy, macro F1, and intra/inter cosine similarities."""
+        import torch.nn.functional as F
+        from sklearn.metrics import f1_score
+
+        N = embs.size(0)
+        if N < 2:
+            return {}
+
+        embs_norm = F.normalize(embs, dim=1)          # (N, d) unit vectors
+        sim = embs_norm @ embs_norm.T                 # (N, N) cosine similarities
+
+        # Leave-one-out 1-NN: exclude self by masking diagonal
+        sim_loo = sim.clone()
+        sim_loo.fill_diagonal_(-2.0)
+        nn_labels = labels[sim_loo.argmax(dim=1)]
+
+        knn_acc = (nn_labels == labels).float().mean().item()
+        macro_f1 = float(
+            f1_score(labels.numpy(), nn_labels.numpy(), average="macro", zero_division=0)
+        )
+
+        # Intra-class similarity (same sender, excluding self) and inter-class
+        same = labels.unsqueeze(0) == labels.unsqueeze(1)  # (N, N)
+        eye = torch.eye(N, dtype=torch.bool)
+        intra_mask = same & ~eye
+        inter_mask = ~same
+
+        intra_sim = sim[intra_mask].mean().item() if intra_mask.any() else 0.0
+        inter_sim = sim[inter_mask].mean().item() if inter_mask.any() else 0.0
+
+        return {
+            "val/knn_acc": knn_acc,
+            "val/macro_f1": macro_f1,
+            "val/intra_cos_sim": intra_sim,
+            "val/inter_cos_sim": inter_sim,
+        }
 
     def _build_scheduler(self, steps_per_epoch: int) -> Any:
         """Construct the LR scheduler based on config.scheduler.

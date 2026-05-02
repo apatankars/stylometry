@@ -43,7 +43,6 @@ training:
 
 wandb:
   project: email-fraud-detection
-  name: mpnet_frozen
   tags:
     - mpnet
     - frozen
