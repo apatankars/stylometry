@@ -74,6 +74,7 @@ class EncoderConfig(BaseModel):
     max_length: int = 512
     projection_dim: int | None = None  # trainable linear projection on top of backbone
     episode_k: int | None = None  # emails per LUAR episode; required when pooling='luar_episode'
+    trust_remote_code: bool = False  # set True for models with custom HF code (e.g. LUAR-MUD)
 
 
 class LossConfig(BaseModel):
