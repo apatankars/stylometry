@@ -89,6 +89,12 @@ class Trainer:
 
         self.model.to(self.device)
 
+        # For LUAR episode pooling, the encoder reduces P*K emails → P*(K/episode_k)
+        # embeddings per batch.  We need to reduce labels by the same factor so
+        # loss shapes stay aligned.  Cache episode_k once at init so the hot path
+        # (per-batch loop) doesn't do attribute lookups.
+        self._episode_k: int | None = getattr(model, "episode_k", None)
+
         # Filter to trainable params only — frozen backbone params must not be
         # passed to the optimizer (they have requires_grad=False and zero grad).
         trainable_params = list(filter(lambda p: p.requires_grad, model.parameters()))
@@ -332,7 +338,11 @@ class Trainer:
                 # prevent float16 underflow during backward.
                 with torch.amp.autocast(device_type=self.device):
                     embeddings = self.model.encode(**token_dict)
-                    loss = self.loss_fn(embeddings, labels)
+                    # LUAR episode pooling collapses K emails → 1 embedding per episode,
+                    # so the batch shrinks from P*K rows to P*(K/episode_k) rows.
+                    # Reduce labels by the same stride so shapes stay aligned.
+                    batch_labels = labels[::self._episode_k] if self._episode_k else labels
+                    loss = self.loss_fn(embeddings, batch_labels)
                 self.scaler.scale(loss).backward()
                 # Unscale before clip_grad_norm so the norm is in "true" units,
                 # not inflated by the loss scale factor.
@@ -343,7 +353,8 @@ class Trainer:
             else:
                 # Standard fp32 path (CPU or if mixed_precision=False).
                 embeddings = self.model.encode(**token_dict)
-                loss = self.loss_fn(embeddings, labels)
+                batch_labels = labels[::self._episode_k] if self._episode_k else labels
+                loss = self.loss_fn(embeddings, batch_labels)
                 loss.backward()
                 # Gradient clipping prevents exploding gradients in transformer fine-tuning;
                 # grad_clip=1.0 is a safe default from the original BERT paper.
@@ -377,12 +388,13 @@ class Trainer:
                 token_dict = {k: v.to(self.device) for k, v in token_dict.items()}
 
                 embeddings = self.model.encode(**token_dict)
-                loss = self.loss_fn(embeddings, labels)
+                batch_labels = labels[::self._episode_k] if self._episode_k else labels
+                loss = self.loss_fn(embeddings, batch_labels)
                 total_loss += loss.item()
                 n_batches += 1
 
                 all_embs.append(embeddings.detach().cpu())
-                all_labels.extend(labels.cpu().tolist())
+                all_labels.extend(batch_labels.cpu().tolist())
 
         metrics: dict[str, float] = {"val/loss": total_loss / max(n_batches, 1)}
         if len(all_embs) > 1:
@@ -394,9 +406,10 @@ class Trainer:
     def _compute_embedding_metrics(
         self, embs: torch.Tensor, labels: torch.Tensor
     ) -> dict[str, float]:
-        """1-NN accuracy, macro F1, and intra/inter cosine similarities."""
+        """1-NN accuracy, macro F1, intra/inter cosine similarities, and pairwise AUROC."""
+        import numpy as np
         import torch.nn.functional as F
-        from sklearn.metrics import f1_score
+        from sklearn.metrics import f1_score, roc_auc_score
 
         N = embs.size(0)
         if N < 2:
@@ -424,11 +437,29 @@ class Trainer:
         intra_sim = sim[intra_mask].mean().item() if intra_mask.any() else 0.0
         inter_sim = sim[inter_mask].mean().item() if inter_mask.any() else 0.0
 
+        # Pairwise AUROC — the standard authorship-verification metric.
+        # For every (i, j) pair (upper triangle), the score is cosine similarity
+        # and the label is 1 if same sender, 0 if different.  AUROC is the
+        # probability that a randomly chosen same-sender pair scores higher than
+        # a randomly chosen different-sender pair.
+        labels_np = labels.numpy()
+        sim_np = sim.numpy()
+        triu_i, triu_j = np.triu_indices(N, k=1)
+        pair_sims = sim_np[triu_i, triu_j]
+        pair_labels = (labels_np[triu_i] == labels_np[triu_j]).astype(int)
+        # roc_auc_score requires at least one positive and one negative pair.
+        auroc = (
+            float(roc_auc_score(pair_labels, pair_sims))
+            if 0 < pair_labels.sum() < len(pair_labels)
+            else 0.5
+        )
+
         return {
             "val/knn_acc": knn_acc,
             "val/macro_f1": macro_f1,
             "val/intra_cos_sim": intra_sim,
             "val/inter_cos_sim": inter_sim,
+            "val/auroc": auroc,
         }
 
     def _build_scheduler(self, steps_per_epoch: int) -> Any:

@@ -101,6 +101,13 @@ class HFEncoder(BaseEncoder):
     def embedding_dim(self) -> int:
         return self._embedding_dim
 
+    @property
+    def episode_k(self) -> int | None:
+        """Number of emails per LUAR episode; None for non-episode-pooling encoders."""
+        if self.config.pooling == "luar_episode":
+            return self.config.episode_k
+        return None
+
     def tokenize(self, texts: list[str]) -> dict[str, torch.Tensor]:
         # padding=True pads all sequences in the batch to the same length.
         # truncation=True + max_length silently clips anything longer than
@@ -135,6 +142,25 @@ class HFEncoder(BaseEncoder):
         # LUAR episode pooling requires a different input shape (B, K, L) and
         # its own forward path — branch before calling the backbone.
         if pooling == "luar_episode":
+            if self.config.episode_k is None:
+                raise ValueError(
+                    "encoder.episode_k must be set when pooling='luar_episode'. "
+                    "Set it to the number of emails per episode in your experiment config."
+                )
+            episode_k = self.config.episode_k
+            n_total = input_ids.size(0)
+            if n_total % episode_k != 0:
+                raise ValueError(
+                    f"Batch size {n_total} is not divisible by episode_k={episode_k}. "
+                    "Ensure batch_size // emails_per_sender_k == P and "
+                    "emails_per_sender_k // episode_k is a whole number."
+                )
+            n_episodes = n_total // episode_k
+            # Reshape flat (P*K, L) → (P*(K/episode_k), episode_k, L).
+            # PKSampler lays emails out as K contiguous emails per sender, so each
+            # consecutive episode_k rows belong to the same sender.
+            input_ids = input_ids.view(n_episodes, episode_k, -1)
+            attention_mask = attention_mask.view(n_episodes, episode_k, -1)
             return self._encode_luar_episode(input_ids, attention_mask, **kwargs)
 
         # Standard (B, L) path for mean and cls pooling.

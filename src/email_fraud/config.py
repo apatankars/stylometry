@@ -73,6 +73,7 @@ class EncoderConfig(BaseModel):
     freeze_backbone: bool = True
     max_length: int = 512
     projection_dim: int | None = None  # trainable linear projection on top of backbone
+    episode_k: int | None = None  # emails per LUAR episode; required when pooling='luar_episode'
 
 
 class LossConfig(BaseModel):

@@ -186,13 +186,33 @@ def _run_training(cfg, EncoderClass, LossClass, HeadClass, args, output_dir: Pat
         num_workers=4,
         pin_memory=(device != "cpu"),
     )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        collate_fn=val_dataset.episode_collate,
-        num_workers=2,
-    )
+
+    # LUAR episode pooling requires P×K structure in every batch so that
+    # consecutive episode_k rows always belong to the same sender.
+    # Use PKSampler for val too; a plain DataLoader would interleave senders
+    # and break the label-reduction stride (labels[::episode_k]).
+    if cfg.encoder.pooling == "luar_episode":
+        val_sampler = PKSampler(
+            sender_ids=val_dataset.sender_ids,
+            p=p,
+            k=cfg.data.emails_per_sender_k,
+            seed=1,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=val_sampler,
+            collate_fn=val_dataset.episode_collate,
+            num_workers=2,
+            pin_memory=(device != "cpu"),
+        )
+    else:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=cfg.training.batch_size,
+            shuffle=False,
+            collate_fn=val_dataset.episode_collate,
+            num_workers=2,
+        )
 
     trainer = Trainer(
         model=encoder,
