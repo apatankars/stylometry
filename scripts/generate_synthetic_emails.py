@@ -35,6 +35,7 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset, load_from_disk
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from email_fraud.config import load_config
@@ -190,29 +191,36 @@ def main() -> None:
     syn_source_ids: list[str] = []
 
     preprocess_cfg = cfg.data.preprocessing
+    total_generated = 0
+    total_accepted = 0
 
-    for sender_idx, sid in enumerate(senders):
+    sender_bar = tqdm(senders, desc="Senders", unit="sender", dynamic_ncols=True)
+    for sid in sender_bar:
         texts = sender_to_texts[sid]
         if len(texts) < args.n_examples:
-            # Skip senders with too few emails to build a good style profile.
+            sender_bar.write(f"  skip {sid}: only {len(texts)} emails (need {args.n_examples})")
             continue
 
         syn_sid = f"{sid}__syn"
         examples = rng.sample(texts, args.n_examples)
-        # Truncate examples so the prompt stays within the model's context window.
         examples = [e[:600] for e in examples]
 
-        # Build one prompt per desired synthetic email with a unique random topic.
         topics = rng.choices(_TOPICS, k=args.n_per_sender)
         prompts = [_build_prompt(examples, topic) for topic in topics]
 
         generated: list[str] = []
-        for batch_start in range(0, len(prompts), args.batch_size):
+        batch_bar = tqdm(
+            range(0, len(prompts), args.batch_size),
+            desc=f"  {sid[:30]}",
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        for batch_start in batch_bar:
             batch = prompts[batch_start : batch_start + args.batch_size]
             generated.extend(_generate_batch(batch, tokenizer, model))
+            batch_bar.set_postfix(generated=len(generated))
 
-        # Run each generated email through the standard preprocessing pipeline.
-        # This filters out degenerate outputs and normalises whitespace/length.
         accepted = 0
         for raw in generated:
             cleaned = preprocess(raw, preprocess_cfg)
@@ -222,12 +230,20 @@ def main() -> None:
                 syn_source_ids.append(sid)
                 accepted += 1
 
-        print(
-            f"[{sender_idx + 1}/{len(senders)}] {sid}: "
-            f"{accepted}/{args.n_per_sender} accepted after preprocessing"
+        total_generated += len(generated)
+        total_accepted += accepted
+        overall_rate = total_accepted / total_generated if total_generated else 0.0
+
+        sender_bar.set_postfix(
+            accepted=total_accepted,
+            rate=f"{overall_rate:.0%}",
+        )
+        sender_bar.write(
+            f"  {sid}: {accepted}/{len(generated)} accepted"
+            f"  (total so far: {total_accepted})"
         )
 
-    print(f"\nTotal synthetic emails: {len(syn_texts)}")
+    print(f"\nDone. {total_accepted}/{total_generated} emails accepted ({total_accepted/max(total_generated,1):.0%})")
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
