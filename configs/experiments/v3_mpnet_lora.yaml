@@ -1,0 +1,59 @@
+# V3 Fix — MPNet + LoRA with corrected hyperparameters (SupCon)
+#
+# V2 post-mortem: v2_mpnet_lora_proj achieved AUROC 0.485 — *below* random
+# (0.50).  Same root cause as the RoBERTa LoRA failure: lr=2e-4 too high,
+# warmup too short, rank too large.  MPNet was hit harder because its sentence-
+# embedding pretraining creates a very different representation geometry
+# (low initial cosine similarity) that requires a gentler adaptation.
+#
+# Fixes applied (same as v3_roberta_lora for a controlled comparison):
+#   lr:           2e-4 → 5e-5
+#   warmup_steps: 200  → 500
+#   r:            16   → 8
+#   epochs:       20   → 40
+#
+# NOTE: MPNet attention modules are named "q" / "v", NOT "query" / "value".
+# Using wrong names silently skips LoRA and degrades the run to frozen.
+
+encoder:
+  model_name_or_path: sentence-transformers/all-mpnet-base-v2
+  pooling: mean
+  freeze_backbone: false
+  lora:
+    r: 8
+    alpha: 16
+    target_modules:
+      - q                      # MPNet uses "q"/"v", not "query"/"value"
+      - v
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 40
+  batch_size: 64
+  lr: 5.0e-5
+  scheduler: cosine
+  warmup_steps: 500
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v3_mpnet_lora
+  tags:
+    - mpnet
+    - lora
+    - projection
+    - supcon
+    - v3-fixed-lora
+  notes: "V3: MPNet + LoRA fix — lr=5e-5, warmup=500, r=8, epochs=40. Ablates v2 hyperparameter failure."

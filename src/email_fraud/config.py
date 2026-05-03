@@ -131,6 +131,22 @@ class PreprocessingConfig(BaseModel):
     max_body_chars: int = 4000         # truncate bodies longer than this
 
 
+class AugmentationConfig(BaseModel):
+    """Settings for LLM-generated synthetic hard negatives.
+
+    synthetic_path: path to the Arrow dataset produced by
+                    scripts/generate_synthetic_emails.py.  If None, augmentation
+                    is disabled and a standard PKSampler is used.
+    n_syn_per_batch: number of synthetic–real sender pairs to guarantee per batch.
+                     Each pair occupies 2 of the P sender slots.  Passed directly
+                     to SyntheticBalancedSampler as n_syn.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    synthetic_path: str | None = None
+    n_syn_per_batch: int = 2
+
+
 class DataConfig(BaseModel):
     """Dataset paths and sampling parameters.
 
@@ -142,6 +158,7 @@ class DataConfig(BaseModel):
     emails_per_sender_k: target K for PKSampler (emails per sender per batch).
     val_split / test_split: fraction of eligible senders reserved for val/test.
     preprocessing: nested config controlling email cleaning.
+    augmentation: optional synthetic hard-negative augmentation settings.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -154,6 +171,7 @@ class DataConfig(BaseModel):
     val_split: float = 0.1
     test_split: float = 0.1
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
+    augmentation: AugmentationConfig = Field(default_factory=AugmentationConfig)
 
 
 class TrainingConfig(BaseModel):

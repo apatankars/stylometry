@@ -112,3 +112,139 @@ class PKSampler(Sampler[list[int]]):
         # Number of P×K batches yielded per epoch.
         # With a batch_sampler, DataLoader uses this directly as len(dataloader).
         return len(self._eligible_senders) // self.p
+
+
+# ---------------------------------------------------------------------------
+# SyntheticBalancedSampler
+# ---------------------------------------------------------------------------
+
+_SYN_SUFFIX = "__syn"
+
+
+class SyntheticBalancedSampler(Sampler[list[int]]):
+    """PKSampler variant that guarantees n_syn synthetic–real sender pairs per batch.
+
+    Each batch of P senders is structured as:
+        - n_syn  synthetic senders  (e.g. "alice@enron.com__syn")
+        - n_syn  their real counterparts  ("alice@enron.com")
+        - P - 2*n_syn  other real senders (no synthetic counterpart in this batch)
+
+    This guarantees that for every batch the contrastive loss directly compares
+    real emails against LLM-generated imitations of the same person — the hardest
+    possible negatives — rather than relying on random batch composition to produce
+    these pairs.
+
+    Senders with a synthetic counterpart are *only* drawn as pairs; they never
+    appear solo.  Senders without a synthetic counterpart fill the remaining slots.
+
+    Args:
+        sender_ids:    Per-item sender id strings (one per dataset item).
+                       Synthetic senders must end with "__syn" and their real
+                       counterpart must also be present (e.g. "alice__syn" requires
+                       "alice" to exist).
+        p:             Total senders per batch (real + synthetic combined).
+        k:             Emails per sender per batch.
+        n_syn:         Number of synthetic–real pairs per batch.  Must satisfy
+                       2 * n_syn <= p.
+        drop_last:     Skip the last partial batch if the epoch runs dry.
+        seed:          Optional RNG seed.
+    """
+
+    def __init__(
+        self,
+        sender_ids: list[str],
+        p: int,
+        k: int,
+        n_syn: int = 2,
+        drop_last: bool = True,
+        seed: int | None = None,
+    ) -> None:
+        super().__init__()
+        if 2 * n_syn > p:
+            raise ValueError(
+                f"2 * n_syn ({2 * n_syn}) must be <= p ({p}); "
+                "each synthetic sender occupies one slot and its real counterpart another."
+            )
+        self.p = p
+        self.k = k
+        self.n_syn = n_syn
+        self.drop_last = drop_last
+        self._rng = random.Random(seed)
+
+        # Build per-sender index lists.
+        sender_to_indices: dict[str, list[int]] = defaultdict(list)
+        for idx, sid in enumerate(sender_ids):
+            sender_to_indices[sid].append(idx)
+
+        def _eligible(sid: str) -> bool:
+            return len(sender_to_indices[sid]) >= k
+
+        # Identify synthetic senders and their real counterparts.
+        syn_senders = {sid for sid in sender_to_indices if sid.endswith(_SYN_SUFFIX)}
+        real_senders = {sid for sid in sender_to_indices if not sid.endswith(_SYN_SUFFIX)}
+
+        # Pairs: (real_sid, syn_sid) where both are eligible.
+        self._eligible_pairs: list[tuple[str, str]] = []
+        for syn_sid in syn_senders:
+            real_sid = syn_sid[: -len(_SYN_SUFFIX)]
+            if real_sid in real_senders and _eligible(real_sid) and _eligible(syn_sid):
+                self._eligible_pairs.append((real_sid, syn_sid))
+
+        # Real-only senders: real senders that do NOT have a synthetic counterpart.
+        # These fill the remaining P - 2*n_syn slots per batch.
+        paired_real = {real for real, _ in self._eligible_pairs}
+        self._eligible_real_only: list[str] = [
+            sid for sid in real_senders if sid not in paired_real and _eligible(sid)
+        ]
+
+        slots_real_only = p - 2 * n_syn
+        if len(self._eligible_pairs) < n_syn:
+            raise ValueError(
+                f"SyntheticBalancedSampler requires at least n_syn={n_syn} eligible "
+                f"synthetic–real pairs; only {len(self._eligible_pairs)} qualify "
+                f"(both sender and its __syn counterpart need >= k={k} emails)."
+            )
+        if len(self._eligible_real_only) < slots_real_only:
+            raise ValueError(
+                f"SyntheticBalancedSampler needs {slots_real_only} real-only senders "
+                f"(p - 2*n_syn = {p} - {2 * n_syn}) but only "
+                f"{len(self._eligible_real_only)} qualify."
+            )
+
+        self._sender_to_indices = dict(sender_to_indices)
+
+    def __iter__(self):
+        pairs = list(self._eligible_pairs)
+        real_only = list(self._eligible_real_only)
+        self._rng.shuffle(pairs)
+        self._rng.shuffle(real_only)
+
+        slots_real_only = self.p - 2 * self.n_syn
+        n_batches = min(len(pairs) // self.n_syn, len(real_only) // slots_real_only)
+
+        for i in range(n_batches):
+            batch_pairs = pairs[i * self.n_syn : (i + 1) * self.n_syn]
+            batch_real = real_only[i * slots_real_only : (i + 1) * slots_real_only]
+
+            # Interleave: real counterpart immediately before its synthetic twin so
+            # episode_collate assigns them adjacent batch-local labels (cosmetic only,
+            # loss is label-order invariant).
+            batch_senders: list[str] = []
+            for real_sid, syn_sid in batch_pairs:
+                batch_senders.extend([real_sid, syn_sid])
+            batch_senders.extend(batch_real)
+
+            indices: list[int] = []
+            for sid in batch_senders:
+                pool = list(self._sender_to_indices[sid])
+                self._rng.shuffle(pool)
+                indices.extend(pool[: self.k])
+
+            yield indices
+
+    def __len__(self) -> int:
+        slots_real_only = self.p - 2 * self.n_syn
+        return min(
+            len(self._eligible_pairs) // self.n_syn,
+            len(self._eligible_real_only) // slots_real_only,
+        )
