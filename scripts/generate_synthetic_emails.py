@@ -30,11 +30,20 @@ from __future__ import annotations
 
 import argparse
 import random
+import time
 from collections import defaultdict
 from pathlib import Path
 
 import torch
 from datasets import Dataset, load_from_disk
+
+# torch.nn.Module.set_submodule was added in PyTorch 2.5; patch it for older builds
+if not hasattr(torch.nn.Module, "set_submodule"):
+    def _set_submodule(self, target: str, module: "torch.nn.Module") -> None:
+        atoms = target.split(".")
+        parent = self.get_submodule(".".join(atoms[:-1])) if len(atoms) > 1 else self
+        setattr(parent, atoms[-1], module)
+    torch.nn.Module.set_submodule = _set_submodule
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
@@ -96,6 +105,8 @@ def _load_model(model_name: str, load_in_4bit: bool):
             bnb_4bit_use_double_quant=True,
         )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=quant_cfg,
@@ -194,11 +205,21 @@ def main() -> None:
     total_generated = 0
     total_accepted = 0
 
-    sender_bar = tqdm(senders, desc="Senders", unit="sender", dynamic_ncols=True)
+    total_emails_to_generate = len(senders) * args.n_per_sender
+    gen_start = time.monotonic()
+
+    overall_bar = tqdm(
+        total=total_emails_to_generate,
+        desc="Overall",
+        unit="email",
+        dynamic_ncols=True,
+    )
+    sender_bar = tqdm(senders, desc="Senders", unit="sender", dynamic_ncols=True, leave=True)
     for sid in sender_bar:
         texts = sender_to_texts[sid]
         if len(texts) < args.n_examples:
             sender_bar.write(f"  skip {sid}: only {len(texts)} emails (need {args.n_examples})")
+            overall_bar.update(args.n_per_sender)
             continue
 
         syn_sid = f"{sid}__syn"
@@ -218,8 +239,12 @@ def main() -> None:
         )
         for batch_start in batch_bar:
             batch = prompts[batch_start : batch_start + args.batch_size]
+            t0 = time.monotonic()
             generated.extend(_generate_batch(batch, tokenizer, model))
-            batch_bar.set_postfix(generated=len(generated))
+            batch_elapsed = time.monotonic() - t0
+            emails_per_sec = len(batch) / batch_elapsed if batch_elapsed > 0 else 0.0
+            overall_bar.update(len(batch))
+            batch_bar.set_postfix(generated=len(generated), rate=f"{emails_per_sec:.2f}e/s")
 
         accepted = 0
         for raw in generated:
@@ -233,15 +258,22 @@ def main() -> None:
         total_generated += len(generated)
         total_accepted += accepted
         overall_rate = total_accepted / total_generated if total_generated else 0.0
+        elapsed = time.monotonic() - gen_start
+        avg_rate = total_generated / elapsed if elapsed > 0 else 0.0
 
-        sender_bar.set_postfix(
+        overall_bar.set_postfix(
             accepted=total_accepted,
-            rate=f"{overall_rate:.0%}",
+            accept_rate=f"{overall_rate:.0%}",
+            rate=f"{avg_rate:.2f}e/s",
         )
+        sender_bar.set_postfix(accepted=total_accepted, rate=f"{overall_rate:.0%}")
         sender_bar.write(
             f"  {sid}: {accepted}/{len(generated)} accepted"
             f"  (total so far: {total_accepted})"
         )
+
+    overall_bar.close()
+    sender_bar.close()
 
     print(f"\nDone. {total_accepted}/{total_generated} emails accepted ({total_accepted/max(total_generated,1):.0%})")
     out_path = Path(args.output)
