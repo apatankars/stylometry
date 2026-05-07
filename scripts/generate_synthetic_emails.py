@@ -9,12 +9,12 @@ Each synthetic email is run through the same preprocessing pipeline as the real
 data so token distributions match.
 
 Usage:
-    python scripts/generate_synthetic_emails.py \\
-        --config configs/base.yaml \\
-        --model mistralai/Mistral-7B-Instruct-v0.3 \\
-        --n-per-sender 10 \\
-        --n-examples 5 \\
-        --output data/synthetic/enron_synthetic \\
+    python scripts/generate_synthetic_emails.py \
+        --config configs/base.yaml \
+        --model mistralai/Mistral-7B-Instruct-v0.3 \
+        --n-per-sender 10 \
+        --n-examples 5 \
+        --output data/synthetic/enron_synthetic \
         --load-in-4bit
 
 Model recommendation:

@@ -5,11 +5,11 @@ prints both side-by-side so you can eyeball style transfer quality.  No dataset
 is saved — this is purely for sanity-checking prompt quality and model output.
 
 Usage:
-    python scripts/preview_synthetic_emails.py \\
-        --config configs/base.yaml \\
-        --model mistralai/Mistral-7B-Instruct-v0.3 \\
-        --n-senders 2 \\
-        --n-generate 2 \\
+    python scripts/preview_synthetic_emails.py \
+        --config configs/base.yaml \
+        --model mistralai/Mistral-7B-Instruct-v0.3 \
+        --n-senders 2 \
+        --n-generate 2 \
         --load-in-4bit
 
     # Pin a specific sender:
