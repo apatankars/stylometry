@@ -1,0 +1,60 @@
+# V4 — RoBERTa + LoRA + projection + synthetic hard negatives
+#
+# Pairs with v3_roberta_lora.yaml (no synthetic) as the within-architecture
+# control.  Hyperparameters mirror v3 exactly so the AUROC delta between
+# v3_roberta_lora and v4_roberta_lora_syn is attributable to the synthetic
+# augmentation alone, not optimisation differences.
+#
+# v3_roberta_lora.yaml is the right control here (NOT v2_roberta_lora_proj):
+# v2 was the failed run (lr=2e-4 + r=16 + 20 epochs collapsed below random),
+# v3 fixed the hyperparameters (lr=5e-5, r=8, warmup=500, 40 epochs).
+#
+# Estimated wall-clock (A100 80GB): ~75–90 min (40 epochs × slightly larger
+# train set due to synthetic augmentation).
+
+encoder:
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: false
+  lora:
+    r: 8
+    alpha: 16
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+  augmentation:
+    synthetic_path: data/synthetic/enron_synthetic
+    n_syn_per_batch: 2
+
+training:
+  epochs: 40
+  batch_size: 64
+  lr: 5.0e-5
+  scheduler: cosine
+  warmup_steps: 500
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v4_roberta_lora_syn
+  tags:
+    - roberta-base
+    - lora
+    - projection
+    - supcon
+    - synthetic-hard-negatives
+    - v4-ablation
+  notes: "V4: RoBERTa LoRA (V3 fixed hyperparameters) + synthetic hard negatives. Pairs with v3_roberta_lora as the within-architecture no-synthetic control."

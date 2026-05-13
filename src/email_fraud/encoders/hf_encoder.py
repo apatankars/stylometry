@@ -52,6 +52,33 @@ class _LUARPeftAdapter(nn.Module):
         return self._luar(input_ids=input_ids, attention_mask=attention_mask)
 
 
+def _patch_luar_meta_device() -> None:
+    # transformers 5.x constructs models inside a meta-device default context, but
+    # LUAR.__init__ does a nested AutoModel.from_pretrained for its distilroberta
+    # backbone — that nested call blows up because it can't materialize weights on
+    # meta. Wrap create_transformer so the nested load runs under a cpu default
+    # device (cpu beats meta on the device stack). One-time init only; no runtime cost.
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    LUAR = get_class_from_dynamic_module("model.LUAR", "rrivera1849/LUAR-MUD")
+    if getattr(LUAR, "_meta_device_patched", False):
+        return
+    original = LUAR.create_transformer
+
+    def create_transformer(self, revision=None):  # type: ignore[no-untyped-def]
+        with torch.device("cpu"):
+            return original(self, revision=revision)
+
+    LUAR.create_transformer = create_transformer
+
+    # transformers 5.x reads `all_tied_weights_keys` (dict of missing→source) during
+    # _finalize_model_loading. LUAR has no tied weights; an empty dict is correct.
+    if not hasattr(LUAR, "all_tied_weights_keys"):
+        LUAR.all_tied_weights_keys = {}
+
+    LUAR._meta_device_patched = True
+
+
 @register("encoder", "hf")
 class HFEncoder(BaseEncoder):
     """HuggingFace AutoModel encoder with optional LoRA fine-tuning.
@@ -77,6 +104,9 @@ class HFEncoder(BaseEncoder):
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model_name_or_path, trust_remote_code=True
         )
+
+        if config.pooling == "luar_episode":
+            _patch_luar_meta_device()
 
         backbone = AutoModel.from_pretrained(
             config.model_name_or_path,

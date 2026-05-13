@@ -174,12 +174,33 @@ def _run_training(cfg, EncoderClass, LossClass, HeadClass, args, output_dir: Pat
             f"({cfg.data.emails_per_sender_k}) = {p} — need at least P=2 senders per batch."
         )
 
-    train_sampler = PKSampler(
-        sender_ids=train_dataset.sender_ids,
-        p=p,
-        k=cfg.data.emails_per_sender_k,
-        seed=0,
-    )
+    if cfg.data.augmentation.synthetic_path:
+        from email_fraud.data.samplers import SyntheticBalancedSampler
+        from email_fraud.data.synthetic import SyntheticAugmentedDataset
+
+        n_syn = cfg.data.augmentation.n_syn_per_batch
+        logger.info(
+            "Augmenting train set with synthetic dataset at %s (n_syn=%d)",
+            cfg.data.augmentation.synthetic_path,
+            n_syn,
+        )
+        train_dataset = SyntheticAugmentedDataset(
+            train_dataset, cfg.data.augmentation.synthetic_path
+        )
+        train_sampler = SyntheticBalancedSampler(
+            sender_ids=train_dataset.sender_ids,
+            p=p,
+            k=cfg.data.emails_per_sender_k,
+            n_syn=n_syn,
+            seed=0,
+        )
+    else:
+        train_sampler = PKSampler(
+            sender_ids=train_dataset.sender_ids,
+            p=p,
+            k=cfg.data.emails_per_sender_k,
+            seed=0,
+        )
     train_loader = DataLoader(
         train_dataset,
         batch_sampler=train_sampler,
@@ -221,6 +242,8 @@ def _run_training(cfg, EncoderClass, LossClass, HeadClass, args, output_dir: Pat
             num_workers=2,
         )
 
+    centroid_probe = _build_centroid_probe(cfg, train_dataset, val_dataset, output_dir)
+
     trainer = Trainer(
         model=encoder,
         loss_fn=loss_fn,
@@ -232,8 +255,51 @@ def _run_training(cfg, EncoderClass, LossClass, HeadClass, args, output_dir: Pat
         device=device,
         eval_config_path=Path(args.config).resolve(),
         eval_data_dir=cfg.data.processed_dir,
+        centroid_probe=centroid_probe,
     )
     trainer.train(train_loader, val_loader)
+
+
+def _build_centroid_probe(cfg, train_dataset, val_dataset, output_dir):
+    """Construct a CentroidProbe for inference-style validation, if possible.
+
+    Profiles a subset of training senders, draws impostor queries from the
+    validation set (sender-disjoint from train), and pulls synthetic hard
+    negatives from cfg.data.augmentation.synthetic_path if it is set.
+    """
+    from email_fraud.scoring.centroid_probe import CentroidProbe
+
+    # Filter synthetic rows out of the profile pool — only real emails should
+    # form the centroids.  Synthetic-augmented datasets append __syn senders
+    # at the end; the rest are real.
+    raw_texts = list(train_dataset._texts)
+    raw_senders = list(train_dataset._sender_ids_list)
+    train_texts = [t for t, s in zip(raw_texts, raw_senders) if not s.endswith("__syn")]
+    train_senders = [s for s in raw_senders if not s.endswith("__syn")]
+    other_texts = list(val_dataset._texts)
+    other_senders = list(val_dataset._sender_ids_list)
+
+    syn_texts: list[str] = []
+    syn_sources: list[str] = []
+    if cfg.data.augmentation.synthetic_path:
+        from datasets import load_from_disk
+        try:
+            syn_ds = load_from_disk(cfg.data.augmentation.synthetic_path)
+            syn_texts = list(syn_ds["text"])
+            syn_sources = list(syn_ds["source_sender_id"])
+        except Exception as e:
+            logger.warning("Could not load synthetic dataset for probe: %s", e)
+
+    return CentroidProbe(
+        train_texts=train_texts,
+        train_senders=train_senders,
+        other_texts=other_texts,
+        other_senders=other_senders,
+        synthetic_texts=syn_texts or None,
+        synthetic_source_senders=syn_sources or None,
+        confidence_tiers=cfg.confidence_tiers,
+        seed=0,
+    )
 
 
 if __name__ == "__main__":

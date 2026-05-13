@@ -46,6 +46,62 @@ from email_fraud.losses.base import BaseLoss
 logger = logging.getLogger(__name__)
 
 
+def _fmt(metrics: dict[str, float], key: str, fmt: str = "{:.3f}", missing: str = "  —  ") -> str:
+    v = metrics.get(key)
+    return fmt.format(v) if v is not None else missing
+
+
+def _format_epoch_summary(
+    epoch: int,
+    total_epochs: int,
+    train_loss: float,
+    val_metrics: dict[str, float],
+    centroid_metrics: dict[str, float],
+    pan_metrics: dict[str, float],
+) -> str:
+    """Compact, human-scannable epoch summary. Full metrics still go to W&B."""
+    width = len(str(total_epochs))
+    header = f"Epoch {epoch:>{width}}/{total_epochs}"
+
+    lines = [
+        f"{header}  loss train={train_loss:.4f} val={_fmt(val_metrics, 'val/loss', '{:.4f}')}"
+        f"  │  val  auroc={_fmt(val_metrics, 'val/auroc')}"
+        f"  f1={_fmt(val_metrics, 'val/macro_f1')}"
+        f"  knn={_fmt(val_metrics, 'val/knn_acc')}"
+    ]
+
+    if centroid_metrics:
+        lines.append(
+            " " * len(header) + "  "
+            f"centroid auroc  vs_other={_fmt(centroid_metrics, 'val/centroid/auroc_genuine_vs_other')}"
+            f"  vs_syn={_fmt(centroid_metrics, 'val/centroid/auroc_genuine_vs_synthetic')}"
+            f"  vs_all={_fmt(centroid_metrics, 'val/centroid/auroc_genuine_vs_all')}"
+        )
+        lines.append(
+            " " * len(header) + "  "
+            f"          gaps   other={_fmt(centroid_metrics, 'val/centroid/gap_other', '{:+.3f}')}"
+            f"  syn={_fmt(centroid_metrics, 'val/centroid/gap_synthetic', '{:+.3f}')}"
+            f"  harder={_fmt(centroid_metrics, 'val/centroid/synthetic_harder', '{:+.3f}')}"
+        )
+        lines.append(
+            " " * len(header) + "  "
+            f"@0.95          prec={_fmt(centroid_metrics, 'val/centroid/precision@0.95')}"
+            f"  rec={_fmt(centroid_metrics, 'val/centroid/recall@0.95')}"
+            f"  fpr_syn={_fmt(centroid_metrics, 'val/centroid/fpr_synthetic@0.95')}"
+            f"  cov@acc={_fmt(centroid_metrics, 'val/centroid/coverage_at_acc@0.95')}"
+        )
+
+    if pan_metrics:
+        lines.append(
+            " " * len(header) + "  "
+            f"test (PAN)     auc={_fmt(pan_metrics, 'auc')}"
+            f"  eer={_fmt(pan_metrics, 'eer')}"
+            f"  f1={_fmt(pan_metrics, 'f1')}"
+        )
+
+    return "\n".join(lines)
+
+
 class Trainer:
     """Contrastive training loop with checkpointing, resume, and wandb logging.
 
@@ -72,6 +128,7 @@ class Trainer:
         device: str | None = None,
         eval_config_path: str | Path | None = None,
         eval_data_dir: str | None = None,
+        centroid_probe: Any = None,
     ) -> None:
         self.model = model
         self.loss_fn = loss_fn
@@ -82,6 +139,8 @@ class Trainer:
         # Optional: path to experiment config & processed eval data dir
         self.eval_config_path = Path(eval_config_path) if eval_config_path is not None else None
         self.eval_data_dir = Path(eval_data_dir) if eval_data_dir is not None else None
+        # Optional CentroidProbe for inference-style genuine/other/synthetic AUROCs.
+        self.centroid_probe = centroid_probe
         # Auto-detect GPU if available; fall back to CPU for local development.
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -166,62 +225,60 @@ class Trainer:
                 val_loss = val_metrics.get("val/loss", float("inf"))
                 current_lr = self.optimizer.param_groups[0]["lr"]
 
-                wandb.log({"epoch": epoch, "train/loss": train_loss, "train/lr": current_lr, **val_metrics})
+                # Centroid-style inference probe: enrolls a fixed pool of senders
+                # by averaging held-out embeddings, then scores genuine / other
+                # / synthetic queries against those centroids.  Cheap (re-encodes
+                # ~1k emails) and runs every val epoch.
+                centroid_metrics: dict[str, float] = {}
+                if self.centroid_probe is not None:
+                    try:
+                        centroid_metrics = self.centroid_probe.evaluate(
+                            self.model, self.device
+                        )
+                    except Exception as e:
+                        logger.warning("CentroidProbe.evaluate failed: %s", e)
+
+                # Pair-cosine PAN metrics on test_pairs.jsonl every 5 epochs.
+                # Logged into the *same* wandb run (no subprocess).
+                pan_metrics: dict[str, float] = {}
+                if (
+                    epoch % 5 == 0
+                    and self.eval_data_dir is not None
+                ):
+                    try:
+                        pan_metrics = self._inline_pan_eval()
+                    except Exception as e:
+                        logger.warning("Inline PAN eval failed: %s", e)
+
+                log_payload = {
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "train/lr": current_lr,
+                    **val_metrics,
+                    **centroid_metrics,
+                    **{f"test/{k}": v for k, v in pan_metrics.items()},
+                }
+                wandb.log(log_payload)
                 logger.info(
-                    "Epoch %d/%d  train/loss=%.4f  %s",
-                    epoch,
-                    self.config.epochs,
-                    train_loss,
-                    "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items()),
+                    "%s",
+                    _format_epoch_summary(
+                        epoch,
+                        self.config.epochs,
+                        train_loss,
+                        val_metrics,
+                        centroid_metrics,
+                        pan_metrics,
+                    ),
                 )
 
-                # Periodic epoch checkpoint (e.g. every 5 epochs for long runs).
                 if epoch % self.config.checkpoint_every_n == 0:
                     self._save_epoch_checkpoint(epoch, val_loss)
-
-                # checkpoint_last.pt is always written — used by the eval script
-                # and as a safe resume point even between periodic checkpoints.
                 self._save_last_checkpoint(epoch, val_loss)
-
-                # checkpoint_best.pt tracks the epoch with the lowest val loss.
-                # This is the checkpoint to use for profile-building / inference,
-                # not necessarily the final epoch.
                 if self.config.save_best and val_loss < self._best_val_loss:
                     self._best_val_loss = val_loss
                     self._save_best_checkpoint(epoch, val_loss)
-
-                # Prune old epoch checkpoints to keep disk usage bounded.
                 if self.config.keep_last_n > 0:
                     self._prune_old_checkpoints(epoch)
-
-                # Periodic PAN evaluation (external script) every 5 epochs if configured.
-                # This runs evaluate.py as a subprocess so it uses a fresh Python
-                # process (avoids GPU memory accumulation during long training runs).
-                if epoch % 5 == 0 and self.eval_config_path is not None and self.eval_data_dir is not None:
-                    import subprocess
-                    import sys
-
-                    # project root is three parents up from this file (src/email_fraud/training)
-                    project_root = Path(__file__).resolve().parents[3]
-                    eval_script = project_root / "scripts" / "evaluate.py"
-                    checkpoint_path = self.output_dir / "checkpoint_last.pt"
-                    cmd = [
-                        sys.executable,
-                        str(eval_script),
-                        "--config",
-                        str(self.eval_config_path),
-                        "--checkpoint",
-                        str(checkpoint_path),
-                        "--data-dir",
-                        str(self.eval_data_dir),
-                    ]
-                    logger.info("Running periodic evaluation (every 5 epochs): %s", " ".join(cmd))
-                    try:
-                        subprocess.run(cmd, check=True)
-                    except subprocess.CalledProcessError as e:
-                        logger.warning("Periodic evaluation failed (exit %s): %s", e.returncode, e)
-                    except Exception as e:
-                        logger.warning("Periodic evaluation failed: %s", e)
 
         finally:
             # Always finish wandb run even if training is interrupted, so the
@@ -406,7 +463,12 @@ class Trainer:
     def _compute_embedding_metrics(
         self, embs: torch.Tensor, labels: torch.Tensor
     ) -> dict[str, float]:
-        """1-NN accuracy, macro F1, intra/inter cosine similarities, and pairwise AUROC."""
+        """1-NN accuracy, macro F1, and pairwise authorship AUROC.
+
+        Pairwise AUROC is the standard authorship-verification number: for every
+        (i, j) pair in the val batch (upper triangle), the score is cosine
+        similarity and the label is 1 if same sender, 0 if different.
+        """
         import numpy as np
         import torch.nn.functional as F
         from sklearn.metrics import f1_score, roc_auc_score
@@ -415,10 +477,9 @@ class Trainer:
         if N < 2:
             return {}
 
-        embs_norm = F.normalize(embs, dim=1)          # (N, d) unit vectors
-        sim = embs_norm @ embs_norm.T                 # (N, N) cosine similarities
+        embs_norm = F.normalize(embs, dim=1)
+        sim = embs_norm @ embs_norm.T
 
-        # Leave-one-out 1-NN: exclude self by masking diagonal
         sim_loo = sim.clone()
         sim_loo.fill_diagonal_(-2.0)
         nn_labels = labels[sim_loo.argmax(dim=1)]
@@ -428,26 +489,11 @@ class Trainer:
             f1_score(labels.numpy(), nn_labels.numpy(), average="macro", zero_division=0)
         )
 
-        # Intra-class similarity (same sender, excluding self) and inter-class
-        same = labels.unsqueeze(0) == labels.unsqueeze(1)  # (N, N)
-        eye = torch.eye(N, dtype=torch.bool)
-        intra_mask = same & ~eye
-        inter_mask = ~same
-
-        intra_sim = sim[intra_mask].mean().item() if intra_mask.any() else 0.0
-        inter_sim = sim[inter_mask].mean().item() if inter_mask.any() else 0.0
-
-        # Pairwise AUROC — the standard authorship-verification metric.
-        # For every (i, j) pair (upper triangle), the score is cosine similarity
-        # and the label is 1 if same sender, 0 if different.  AUROC is the
-        # probability that a randomly chosen same-sender pair scores higher than
-        # a randomly chosen different-sender pair.
         labels_np = labels.numpy()
         sim_np = sim.numpy()
         triu_i, triu_j = np.triu_indices(N, k=1)
         pair_sims = sim_np[triu_i, triu_j]
         pair_labels = (labels_np[triu_i] == labels_np[triu_j]).astype(int)
-        # roc_auc_score requires at least one positive and one negative pair.
         auroc = (
             float(roc_auc_score(pair_labels, pair_sims))
             if 0 < pair_labels.sum() < len(pair_labels)
@@ -457,10 +503,57 @@ class Trainer:
         return {
             "val/knn_acc": knn_acc,
             "val/macro_f1": macro_f1,
-            "val/intra_cos_sim": intra_sim,
-            "val/inter_cos_sim": inter_sim,
             "val/auroc": auroc,
         }
+
+    def _inline_pan_eval(self) -> dict[str, float]:
+        """Score test_pairs.jsonl with the current encoder and return PAN metrics.
+
+        Used during training to log AUC / EER / c@1 / F0.5u to the same W&B run
+        each time validation runs (every 5 epochs).  Subprocess-free so no extra
+        wandb.init is created.
+        """
+        import json
+        import numpy as np
+        import torch.nn.functional as F
+        from email_fraud.scoring.metrics import compute_pan_metrics
+
+        pairs_path = self.eval_data_dir / "test_pairs.jsonl"
+        if not pairs_path.exists():
+            return {}
+
+        pairs: list[tuple[str, str, int]] = []
+        with pairs_path.open() as fh:
+            for line in fh:
+                rec = json.loads(line)
+                if "pair" in rec:
+                    text1, text2 = rec["pair"]
+                else:
+                    text1 = rec.get("text1") or rec.get("text_a")
+                    text2 = rec.get("text2") or rec.get("text_b")
+                label = int(bool(rec.get("same", rec.get("label", 0))))
+                pairs.append((str(text1), str(text2), label))
+
+        flat_texts = [t for p in pairs for t in p[:2]]
+        was_training = self.model.training
+        self.model.eval()
+        all_embs: list[torch.Tensor] = []
+        with torch.no_grad():
+            for start in range(0, len(flat_texts), 64):
+                batch = flat_texts[start : start + 64]
+                tok = self.model.tokenize(batch)
+                tok = {k: v.to(self.device) for k, v in tok.items()}
+                all_embs.append(self.model.encode(**tok).detach().cpu())
+        if was_training:
+            self.model.train()
+        embs = torch.cat(all_embs, dim=0)
+
+        scores = []
+        for i in range(0, embs.size(0), 2):
+            sim = F.cosine_similarity(embs[i].unsqueeze(0), embs[i + 1].unsqueeze(0)).item()
+            scores.append((sim + 1.0) / 2.0)
+        labels = np.array([lbl for _, _, lbl in pairs], dtype=np.int64)
+        return compute_pan_metrics(labels, np.array(scores, dtype=np.float64))
 
     def _build_scheduler(self, steps_per_epoch: int) -> Any:
         """Construct the LR scheduler based on config.scheduler.

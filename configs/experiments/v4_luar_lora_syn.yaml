@@ -1,0 +1,65 @@
+# V4 — LUAR + LoRA + projection + synthetic hard negatives
+#
+# Builds on v2_luar_lora (best V2 config: AUROC 0.956 on Enron test pairs).
+# The only intentional change is wiring the LLM-generated synthetic dataset
+# at data/synthetic/enron_synthetic into training via SyntheticAugmentedDataset
+# + SyntheticBalancedSampler.  Each batch is forced to contain n_syn_per_batch
+# (real, synthetic) sender pairs of the same person so SupCon must learn to
+# push apart "real-Alice" vs "synthetic-Alice-style" — a strictly harder
+# discrimination than separating Alice from random other senders.
+#
+# Hyperparameters mirror v2_luar_lora exactly so any AUROC delta is
+# attributable to the augmentation, not optimisation differences.
+#
+# Estimated wall-clock (A100 80GB): ~50 min (slightly more than v2 because
+# the train set grows by len(synthetic) emails — typically ~25%).
+
+encoder:
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode
+  freeze_backbone: false
+  lora:
+    r: 16
+    alpha: 32
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+  episode_k: 4
+  trust_remote_code: true
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+  augmentation:
+    synthetic_path: data/synthetic/enron_synthetic
+    n_syn_per_batch: 2
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 2.0e-4
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v4_luar_lora_syn
+  tags:
+    - luar
+    - lora
+    - projection
+    - supcon
+    - episode-pooling
+    - synthetic-hard-negatives
+    - v4-ablation
+  notes: "V4: v2_luar_lora + LLM-generated hard negatives via SyntheticBalancedSampler (n_syn=2). Tests whether forcing real-vs-synthetic-self contrast sharpens stylometric features."
