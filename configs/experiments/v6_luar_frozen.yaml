@@ -1,0 +1,56 @@
+# V6 ablation — LUAR frozen backbone + projection head, NO synthetic augmentation.
+#
+# 2x2 ablation over (backbone trainable) x (synthetic hard negatives):
+#
+#                  │ no-synthetic       with-synthetic
+#   ───────────────┼─────────────────────────────────────
+#   LUAR frozen    │ v6_luar_frozen      v6_luar_frozen_syn
+#   LUAR LoRA      │ v6_luar_lora        v6_luar_lora_syn
+#
+# All four runs use a 100-epoch budget with early stopping (patience=8 epochs
+# on val/loss). LUAR-MUD backbone is frozen here; only the 512→128 projection
+# head is trained, so the higher lr=1e-3 is appropriate.
+
+encoder:
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode
+  freeze_backbone: true
+  lora: null
+  max_length: 512
+  projection_dim: 128
+  episode_k: 4
+  trust_remote_code: true
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-3
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+  early_stopping_patience: 0
+  early_stopping_min_delta: 1.0e-4
+  keep_last_n: 1
+
+wandb:
+  name: v6_luar_frozen
+  tags:
+    - luar
+    - frozen
+    - projection
+    - supcon
+    - episode-pooling
+    - no-synthetic
+    - v6-ablation
+  notes: "V6 ablation: frozen LUAR-MUD + projection head, no synthetic augmentation. 100 epochs with early stopping (patience=8)."

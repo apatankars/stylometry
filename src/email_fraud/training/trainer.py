@@ -65,30 +65,30 @@ def _format_epoch_summary(
 
     lines = [
         f"{header}  loss train={train_loss:.4f} val={_fmt(val_metrics, 'val/loss', '{:.4f}')}"
-        f"  │  val  auroc={_fmt(val_metrics, 'val/auroc')}"
-        f"  f1={_fmt(val_metrics, 'val/macro_f1')}"
-        f"  knn={_fmt(val_metrics, 'val/knn_acc')}"
+        f"  │  embed  pair_auc={_fmt(val_metrics, 'embedding/pair_auroc')}"
+        f"  knn_f1={_fmt(val_metrics, 'embedding/knn_macro_f1')}"
+        f"  knn_acc={_fmt(val_metrics, 'embedding/knn_accuracy')}"
     ]
 
     if centroid_metrics:
         lines.append(
             " " * len(header) + "  "
-            f"centroid auroc  vs_other={_fmt(centroid_metrics, 'val/centroid/auroc_genuine_vs_other')}"
-            f"  vs_syn={_fmt(centroid_metrics, 'val/centroid/auroc_genuine_vs_synthetic')}"
-            f"  vs_all={_fmt(centroid_metrics, 'val/centroid/auroc_genuine_vs_all')}"
+            f"centroid auc    vs_other={_fmt(centroid_metrics, 'auc/genuine_vs_other')}"
+            f"  vs_syn={_fmt(centroid_metrics, 'auc/genuine_vs_synthetic')}"
+            f"  vs_all={_fmt(centroid_metrics, 'auc/genuine_vs_all')}"
         )
         lines.append(
             " " * len(header) + "  "
-            f"          gaps   other={_fmt(centroid_metrics, 'val/centroid/gap_other', '{:+.3f}')}"
-            f"  syn={_fmt(centroid_metrics, 'val/centroid/gap_synthetic', '{:+.3f}')}"
-            f"  harder={_fmt(centroid_metrics, 'val/centroid/synthetic_harder', '{:+.3f}')}"
+            f"          gaps   other={_fmt(centroid_metrics, 'score/gap_other', '{:+.3f}')}"
+            f"  syn={_fmt(centroid_metrics, 'score/gap_synthetic', '{:+.3f}')}"
+            f"  harder={_fmt(centroid_metrics, 'score/synthetic_harder_than_other', '{:+.3f}')}"
         )
         lines.append(
             " " * len(header) + "  "
-            f"@0.95          prec={_fmt(centroid_metrics, 'val/centroid/precision@0.95')}"
-            f"  rec={_fmt(centroid_metrics, 'val/centroid/recall@0.95')}"
-            f"  fpr_syn={_fmt(centroid_metrics, 'val/centroid/fpr_synthetic@0.95')}"
-            f"  cov@acc={_fmt(centroid_metrics, 'val/centroid/coverage_at_acc@0.95')}"
+            f"@0.95          prec={_fmt(centroid_metrics, 'threshold_0.95/precision')}"
+            f"  rec={_fmt(centroid_metrics, 'threshold_0.95/recall')}"
+            f"  fpr_syn={_fmt(centroid_metrics, 'threshold_0.95/fpr_synthetic')}"
+            f"  cov@acc={_fmt(centroid_metrics, 'coverage/at_acc_0.95')}"
         )
 
     if pan_metrics:
@@ -176,6 +176,8 @@ class Trainer:
 
         self._start_epoch: int = 1
         self._best_val_loss: float = float("inf")
+        # Counts consecutive epochs without val/loss improvement; reset on improvement.
+        self._epochs_since_improvement: int = 0
 
         # Restore model, optimizer, scaler, and epoch counter from checkpoint.
         if resume_from is not None:
@@ -250,12 +252,25 @@ class Trainer:
                     except Exception as e:
                         logger.warning("Inline PAN eval failed: %s", e)
 
+                # Pull SyntheticBalancedSampler composition stats if present.
+                # Plain PKSampler doesn't expose pop_epoch_stats — getattr keeps
+                # this opt-in without an isinstance check + import cycle risk.
+                sampler_stats: dict[str, float] = {}
+                pop_fn = getattr(
+                    getattr(train_loader, "batch_sampler", None),
+                    "pop_epoch_stats",
+                    None,
+                )
+                if callable(pop_fn):
+                    sampler_stats = pop_fn()
+
                 log_payload = {
                     "epoch": epoch,
                     "train/loss": train_loss,
                     "train/lr": current_lr,
                     **val_metrics,
                     **centroid_metrics,
+                    **sampler_stats,
                     **{f"test/{k}": v for k, v in pan_metrics.items()},
                 }
                 wandb.log(log_payload)
@@ -274,11 +289,35 @@ class Trainer:
                 if epoch % self.config.checkpoint_every_n == 0:
                     self._save_epoch_checkpoint(epoch, val_loss)
                 self._save_last_checkpoint(epoch, val_loss)
-                if self.config.save_best and val_loss < self._best_val_loss:
-                    self._best_val_loss = val_loss
-                    self._save_best_checkpoint(epoch, val_loss)
+                improved = val_loss < (
+                    self._best_val_loss - self.config.early_stopping_min_delta
+                )
+                if improved:
+                    self._epochs_since_improvement = 0
+                    if self.config.save_best:
+                        self._best_val_loss = val_loss
+                        self._save_best_checkpoint(epoch, val_loss)
+                    else:
+                        self._best_val_loss = val_loss
+                else:
+                    self._epochs_since_improvement += 1
                 if self.config.keep_last_n > 0:
                     self._prune_old_checkpoints(epoch)
+
+                if (
+                    self.config.early_stopping_patience > 0
+                    and self._epochs_since_improvement
+                    >= self.config.early_stopping_patience
+                ):
+                    logger.info(
+                        "Early stopping at epoch %d: no val/loss improvement "
+                        "for %d epochs (best=%.4f).",
+                        epoch,
+                        self._epochs_since_improvement,
+                        self._best_val_loss,
+                    )
+                    wandb.log({"early_stopped_at_epoch": epoch})
+                    break
 
         finally:
             # Always finish wandb run even if training is interrupted, so the
@@ -501,9 +540,9 @@ class Trainer:
         )
 
         return {
-            "val/knn_acc": knn_acc,
-            "val/macro_f1": macro_f1,
-            "val/auroc": auroc,
+            "embedding/knn_accuracy": knn_acc,
+            "embedding/knn_macro_f1": macro_f1,
+            "embedding/pair_auroc": auroc,
         }
 
     def _inline_pan_eval(self) -> dict[str, float]:

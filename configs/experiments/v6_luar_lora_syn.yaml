@@ -1,0 +1,55 @@
+# V6 ablation — LUAR + LoRA fine-tuning + projection head + synthetic hard negatives.
+# Paired with v6_luar_lora. See v6_luar_frozen.yaml for the 2x2 layout.
+
+encoder:
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode
+  freeze_backbone: false
+  lora:
+    r: 16
+    alpha: 32
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+  episode_k: 4
+  trust_remote_code: true
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+  augmentation:
+    synthetic_path: data/synthetic/enron_synthetic
+    n_syn_per_batch: 2
+
+training:
+  epochs: 100
+  batch_size: 64
+  lr: 2.0e-4
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+  early_stopping_patience: 0
+  early_stopping_min_delta: 1.0e-4
+  keep_last_n: 1
+
+wandb:
+  name: v6_luar_lora_syn
+  tags:
+    - luar
+    - lora
+    - projection
+    - supcon
+    - episode-pooling
+    - synthetic-hard-negatives
+    - v6-ablation
+  notes: "V6 ablation: LUAR-MUD + LoRA (r=16) + projection + synthetic hard negatives (n_syn=2). 100 epochs with early stopping (patience=8)."

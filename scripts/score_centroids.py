@@ -175,43 +175,41 @@ def main() -> None:
     print(f"  Synthetic      : {args.include_synthetic or '(none)'}")
     print(sep)
     summary_keys = [
-        "val/centroid/auroc_genuine_vs_other",
-        "val/centroid/auroc_genuine_vs_synthetic",
-        "val/centroid/auroc_genuine_vs_all",
-        "val/centroid/score_genuine",
-        "val/centroid/score_other",
-        "val/centroid/score_synthetic",
-        "val/centroid/gap_other",
-        "val/centroid/gap_synthetic",
-        "val/centroid/synthetic_harder",
-        "val/centroid/n_genuine",
-        "val/centroid/n_other",
-        "val/centroid/n_synthetic",
+        "auc/genuine_vs_other",
+        "auc/genuine_vs_synthetic",
+        "auc/genuine_vs_all",
+        "score/mean_genuine",
+        "score/mean_other",
+        "score/mean_synthetic",
+        "score/gap_other",
+        "score/gap_synthetic",
+        "score/synthetic_harder_than_other",
+        "probe/n_genuine_queries",
+        "probe/n_other_queries",
+        "probe/n_synthetic_queries",
     ]
     for key in summary_keys:
         if key in metrics:
-            label = key.replace("val/centroid/", "")
-            print(f"  {label:<32} {metrics[key]:.4f}")
+            print(f"  {key:<40} {metrics[key]:.4f}")
 
     # Threshold-band table — the "reports >50%/>80%/>95%" view.
     print(sep)
     print(f"  {'threshold':<12}{'report_rate':>12}{'precision':>11}"
           f"{'recall':>9}{'fpr_other':>11}{'fpr_syn':>10}")
     for tau in (0.5, 0.8, 0.95):
-        s = f"{tau:.2f}".rstrip("0").rstrip(".")
-        rr = metrics.get(f"val/centroid/report_rate@{s}", float("nan"))
-        pr = metrics.get(f"val/centroid/precision@{s}", float("nan"))
-        rc = metrics.get(f"val/centroid/recall@{s}", float("nan"))
-        fo = metrics.get(f"val/centroid/fpr_other@{s}", float("nan"))
-        fs = metrics.get(f"val/centroid/fpr_synthetic@{s}", float("nan"))
-        print(f"  >{s:<11}{rr:>12.3f}{pr:>11.3f}{rc:>9.3f}{fo:>11.3f}{fs:>10.3f}")
+        group = f"threshold_{tau:.2f}"
+        rr = metrics.get(f"{group}/report_rate", float("nan"))
+        pr = metrics.get(f"{group}/precision", float("nan"))
+        rc = metrics.get(f"{group}/recall", float("nan"))
+        fo = metrics.get(f"{group}/fpr_other", float("nan"))
+        fs = metrics.get(f"{group}/fpr_synthetic", float("nan"))
+        print(f"  >{tau:<11.2f}{rr:>12.3f}{pr:>11.3f}{rc:>9.3f}{fo:>11.3f}{fs:>10.3f}")
 
     # Selective-classification view: coverage @ accuracy target.
     print(sep)
     for target in (0.5, 0.8, 0.95):
-        s = f"{target:.2f}".rstrip("0").rstrip(".")
-        cov = metrics.get(f"val/centroid/coverage_at_acc@{s}", float("nan"))
-        print(f"  coverage @ accuracy ≥ {s:<6}      {cov:.3f}")
+        cov = metrics.get(f"coverage/at_acc_{target:.2f}", float("nan"))
+        print(f"  coverage @ accuracy ≥ {target:.2f}      {cov:.3f}")
     print(f"{sep}\n")
 
     if args.wandb:

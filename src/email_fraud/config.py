@@ -189,6 +189,10 @@ class TrainingConfig(BaseModel):
     checkpoint_every_n: save a numbered checkpoint every N epochs.
     keep_last_n: delete numbered checkpoints older than the last N (0 = keep all).
     save_best: maintain checkpoint_best.pt for the lowest val/loss epoch.
+    early_stopping_patience: stop after this many epochs without val/loss improvement
+                             (improvement = drop of at least early_stopping_min_delta).
+                             0 disables early stopping (train the full epochs budget).
+    early_stopping_min_delta: minimum val/loss decrease to count as improvement.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -203,6 +207,8 @@ class TrainingConfig(BaseModel):
     checkpoint_every_n: int = 1       # save a checkpoint every N epochs
     keep_last_n: int = 3              # keep only the N most recent epoch checkpoints (0 = keep all)
     save_best: bool = True            # maintain a checkpoint_best.pt tracking lowest val/loss
+    early_stopping_patience: int = 0  # epochs without val/loss improvement before stopping; 0 disables
+    early_stopping_min_delta: float = 0.0
 
 
 class WandbConfig(BaseModel):

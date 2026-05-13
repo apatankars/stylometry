@@ -164,18 +164,28 @@ class CentroidProbe:
     def evaluate(self, encoder, device: str, batch_size: int = 32) -> dict[str, float]:
         """Re-encode the fixed probe set with current encoder weights.
 
-        Returns a dict of metrics keyed for direct W&B logging:
-            val/centroid/auroc_genuine_vs_other
-            val/centroid/auroc_genuine_vs_synthetic
-            val/centroid/auroc_genuine_vs_all
-            val/centroid/score_genuine
-            val/centroid/score_other
-            val/centroid/score_synthetic
-            val/centroid/gap_other        = genuine - other
-            val/centroid/gap_synthetic    = genuine - synthetic
-            val/centroid/synthetic_harder = (gap_other - gap_synthetic)
+        Returns a dict of metrics keyed for direct W&B logging. Keys use top-level
+        prefixes per concept so W&B's sidebar splits them into separate panels:
+
+            auc/genuine_vs_other      AUROC: real emails vs random-other-sender
+            auc/genuine_vs_synthetic  AUROC: real emails vs LLM imitation (hard)
+            auc/genuine_vs_all        AUROC: real vs pooled impostors
+
+            score/mean_genuine        Mean centroid score per pool
+            score/mean_other
+            score/mean_synthetic
+            score/gap_other           mean_genuine - mean_other
+            score/gap_synthetic       mean_genuine - mean_synthetic
+            score/synthetic_harder_than_other  gap_other - gap_synthetic
               positive ⇒ synthetics are harder than other-sender emails (good)
               negative ⇒ synthetics are EASIER (LLM artifacts dominate, suspicious)
+
+            probe/n_genuine_queries   Diagnostic query counts
+            probe/n_other_queries
+            probe/n_synthetic_queries
+
+        Threshold-band metrics live under threshold_{τ}/ and coverage metrics
+        under coverage/, populated by the helpers below.
         """
         from sklearn.metrics import roc_auc_score
 
@@ -220,39 +230,39 @@ class CentroidProbe:
             encoder.train()
 
         out: dict[str, float] = {
-            "val/centroid/score_genuine": float(genuine_scores.mean()) if len(genuine_scores) else 0.0,
-            "val/centroid/score_other": float(other_scores.mean()) if len(other_scores) else 0.0,
-            "val/centroid/score_synthetic": float(syn_scores.mean()) if len(syn_scores) else 0.0,
-            "val/centroid/n_genuine": float(len(genuine_scores)),
-            "val/centroid/n_other": float(len(other_scores)),
-            "val/centroid/n_synthetic": float(len(syn_scores)),
+            "score/mean_genuine": float(genuine_scores.mean()) if len(genuine_scores) else 0.0,
+            "score/mean_other": float(other_scores.mean()) if len(other_scores) else 0.0,
+            "score/mean_synthetic": float(syn_scores.mean()) if len(syn_scores) else 0.0,
+            "probe/n_genuine_queries": float(len(genuine_scores)),
+            "probe/n_other_queries": float(len(other_scores)),
+            "probe/n_synthetic_queries": float(len(syn_scores)),
         }
 
         # AUROC: genuine (label=1) vs other (label=0). Higher score = more genuine.
         if len(genuine_scores) and len(other_scores):
             labels = np.concatenate([np.ones_like(genuine_scores), np.zeros_like(other_scores)])
             scores = np.concatenate([genuine_scores, other_scores])
-            out["val/centroid/auroc_genuine_vs_other"] = float(roc_auc_score(labels, scores))
-            out["val/centroid/gap_other"] = float(genuine_scores.mean() - other_scores.mean())
+            out["auc/genuine_vs_other"] = float(roc_auc_score(labels, scores))
+            out["score/gap_other"] = float(genuine_scores.mean() - other_scores.mean())
 
         if len(genuine_scores) and len(syn_scores):
             labels = np.concatenate([np.ones_like(genuine_scores), np.zeros_like(syn_scores)])
             scores = np.concatenate([genuine_scores, syn_scores])
-            out["val/centroid/auroc_genuine_vs_synthetic"] = float(roc_auc_score(labels, scores))
-            out["val/centroid/gap_synthetic"] = float(genuine_scores.mean() - syn_scores.mean())
+            out["auc/genuine_vs_synthetic"] = float(roc_auc_score(labels, scores))
+            out["score/gap_synthetic"] = float(genuine_scores.mean() - syn_scores.mean())
 
         # Combined: genuine vs (other ∪ synthetic) — the "all impostors" pool.
         if len(genuine_scores) and (len(other_scores) or len(syn_scores)):
             neg = np.concatenate([other_scores, syn_scores])
             labels = np.concatenate([np.ones_like(genuine_scores), np.zeros_like(neg)])
             scores = np.concatenate([genuine_scores, neg])
-            out["val/centroid/auroc_genuine_vs_all"] = float(roc_auc_score(labels, scores))
+            out["auc/genuine_vs_all"] = float(roc_auc_score(labels, scores))
 
         # Difficulty differential: positive ⇒ synthetic is harder than other-sender,
         # which is what we want from a useful hard-negative augmentation.
-        if "val/centroid/gap_other" in out and "val/centroid/gap_synthetic" in out:
-            out["val/centroid/synthetic_harder"] = (
-                out["val/centroid/gap_other"] - out["val/centroid/gap_synthetic"]
+        if "score/gap_other" in out and "score/gap_synthetic" in out:
+            out["score/synthetic_harder_than_other"] = (
+                out["score/gap_other"] - out["score/gap_synthetic"]
             )
 
         # Operating-point reports: at score thresholds 0.5 / 0.8 / 0.95, how
@@ -296,29 +306,31 @@ def _threshold_band_metrics(
     impostors = np.concatenate([other, synthetic]) if (len(other) or len(synthetic)) else np.array([])
 
     for tau in _THRESHOLDS:
-        suffix = f"{tau:.2f}".rstrip("0").rstrip(".")  # "0.5", "0.8", "0.95"
+        # Zero-padded so panel sections sort naturally: threshold_0.50, _0.80, _0.95.
+        # (Previous "0.5"/"0.8"/"0.95" sorted lexicographically and looked random.)
+        group = f"threshold_{tau:.2f}"
 
         # report_rate over the full query stream (genuine + impostors).
         all_scores = np.concatenate([genuine, impostors]) if len(impostors) else genuine
         if len(all_scores):
-            out[f"val/centroid/report_rate@{suffix}"] = float((all_scores > tau).mean())
+            out[f"{group}/report_rate"] = float((all_scores > tau).mean())
 
         # Fraction of each pool above the threshold — the boss's "report >X%" view.
+        # (Dropped the duplicate "genuine_above@τ" key: it was identical to recall.)
         if len(genuine):
-            out[f"val/centroid/recall@{suffix}"] = float((genuine > tau).mean())
-            out[f"val/centroid/genuine_above@{suffix}"] = float((genuine > tau).mean())
+            out[f"{group}/recall"] = float((genuine > tau).mean())
         if len(other):
-            out[f"val/centroid/fpr_other@{suffix}"] = float((other > tau).mean())
+            out[f"{group}/fpr_other"] = float((other > tau).mean())
         if len(synthetic):
-            out[f"val/centroid/fpr_synthetic@{suffix}"] = float((synthetic > tau).mean())
+            out[f"{group}/fpr_synthetic"] = float((synthetic > tau).mean())
         if len(impostors):
-            out[f"val/centroid/fpr_overall@{suffix}"] = float((impostors > tau).mean())
+            out[f"{group}/fpr_overall"] = float((impostors > tau).mean())
 
         # Precision against the pooled impostor set.
         if len(genuine) and len(impostors):
             tp = float((genuine > tau).sum())
             fp = float((impostors > tau).sum())
-            out[f"val/centroid/precision@{suffix}"] = (
+            out[f"{group}/precision"] = (
                 tp / (tp + fp) if (tp + fp) > 0 else 0.0
             )
 
@@ -327,7 +339,7 @@ def _threshold_band_metrics(
             n_g = len(genuine)
             n_i = len(impostors)
             correct = float((genuine > tau).sum()) + float((impostors <= tau).sum())
-            out[f"val/centroid/accuracy@{suffix}"] = correct / (n_g + n_i)
+            out[f"{group}/accuracy"] = correct / (n_g + n_i)
 
     return out
 
@@ -381,13 +393,10 @@ def _coverage_at_accuracy(
     coverage = ks / len(correct_sorted)
 
     for target in _ACCURACY_TARGETS:
+        # Zero-padded so coverage/at_acc_0.50 sorts before _0.80 and _0.95.
+        key = f"coverage/at_acc_{target:.2f}"
         mask = running_acc >= target
-        if mask.any():
-            out[f"val/centroid/coverage_at_acc@{target:.2f}".rstrip("0").rstrip(".")] = (
-                float(coverage[mask].max())
-            )
-        else:
-            out[f"val/centroid/coverage_at_acc@{target:.2f}".rstrip("0").rstrip(".")] = 0.0
+        out[key] = float(coverage[mask].max()) if mask.any() else 0.0
 
     return out
 

@@ -1,48 +1,43 @@
 #!/usr/bin/env bash
-# V5 ablation suite — 2x2 over (architecture) x (synthetic hard negatives).
+# V6 ablation suite — 2x2 over (backbone trainable) x (synthetic hard negatives),
+# LUAR-only.
 #
-# Tests two questions in one suite:
-#   Q1: Does synthetic hard-negative augmentation improve stylometric
-#       discrimination?  (within-architecture pairs)
-#   Q2: Is the effect architecture-dependent?  (across-architecture)
+#                  │ no-synthetic        with-synthetic
+#   ───────────────┼──────────────────────────────────────
+#   LUAR frozen    │ v6_luar_frozen      v6_luar_frozen_syn
+#   LUAR LoRA      │ v6_luar_lora        v6_luar_lora_syn
 #
-#                 │ no-synthetic      with-synthetic
-#   ──────────────┼──────────────────────────────────────────────
-#   LUAR LoRA     │ v5_luar_lora      v5_luar_lora_syn
-#   RoBERTa LoRA  │ v5_roberta_lora   v5_roberta_lora_syn
+# Two questions in one suite:
+#   Q1: Does synthetic hard-negative augmentation help LUAR?  (within-row pairs)
+#   Q2: Does fine-tuning (LoRA) on top of LUAR-MUD beat using LUAR frozen as a
+#       pure feature extractor?  (across-row pairs)
 #
-# Same design as the V4 suite; all runs are re-executed under v5 naming so
-# results land in a single W&B group and can be compared side-by-side without
-# mixing with earlier runs.
+# Comparability — locked across all four runs:
+#   loss:                   supcon, temperature=0.07
+#   data:                   100 train senders, K=8 emails/sender, 10/10 val/test
+#   batch_size:             64
+#   scheduler:              cosine, warmup=200
+#   grad_clip:              1.0
+#   mixed_precision:        true
+#   epochs:                 100
+#   early_stopping_patience:8 (on val/loss, min_delta=1e-4)
 #
-# Comparability — what's locked across all four runs:
-#   loss:           supcon, temperature=0.07
-#   data:           100 train senders, K=8 emails/sender, 10/10 val/test
-#   batch_size:     64
-#   scheduler:      cosine
-#   grad_clip:      1.0
-#   mixed_precision: true
+# Variable by design:
+#   frozen rows:  lr=1e-3   (only projection head trains)
+#   LoRA rows:    lr=2e-4   (LoRA adapters + projection head train)
 #
-# Variable by design (architecture-appropriate):
-#   LUAR LoRA:     lr=2e-4, r=16, warmup=200, epochs=20
-#   RoBERTa LoRA:  lr=5e-5, r=8,  warmup=500, epochs=40
-#
-# Estimated wall-clock (A100 80GB), sequential:
-#   v5_luar_lora              ~40 min
-#   v5_luar_lora_syn          ~50 min
-#   v5_roberta_lora           ~75 min
-#   v5_roberta_lora_syn       ~90 min
-#   ─────────────────────────────────────
-#   total                     ~4.5 h
+# Each run will stop early once val/loss hasn't improved for 8 consecutive
+# epochs, so wall-clock varies. With patience=8 on a typical SupCon curve we
+# expect 25-45 epochs in practice; the 100-epoch budget is a hard cap.
 #
 # Usage:
-#   bash scripts/run_experiments_v5.sh                       # all four runs sequentially
-#   bash scripts/run_experiments_v5.sh luar                  # only the LUAR row
-#   bash scripts/run_experiments_v5.sh roberta               # only the RoBERTa row
-#   bash scripts/run_experiments_v5.sh syn                   # only the synthetic column
-#   bash scripts/run_experiments_v5.sh baseline              # only the no-synthetic column
-#   bash scripts/run_experiments_v5.sh v5_luar_lora_syn      # a single named experiment
-#   bash scripts/run_experiments_v5.sh v5_luar_lora_syn.yaml # also accepted (with extension)
+#   bash scripts/run_experiments_v6.sh                       # all four runs sequentially
+#   bash scripts/run_experiments_v6.sh frozen                # only the frozen row
+#   bash scripts/run_experiments_v6.sh lora                  # only the LoRA row
+#   bash scripts/run_experiments_v6.sh syn                   # only the synthetic column
+#   bash scripts/run_experiments_v6.sh baseline              # only the no-synthetic column
+#   bash scripts/run_experiments_v6.sh v6_luar_lora_syn      # a single named experiment
+#   bash scripts/run_experiments_v6.sh v6_luar_lora_syn.yaml # also accepted (with extension)
 
 set -euo pipefail
 
@@ -50,36 +45,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-LUAR_BASELINE="configs/experiments/v5_luar_lora.yaml"
-LUAR_SYN="configs/experiments/v5_luar_lora_syn.yaml"
-ROBERTA_BASELINE="configs/experiments/v5_roberta_lora.yaml"
-ROBERTA_SYN="configs/experiments/v5_roberta_lora_syn.yaml"
+FROZEN_BASELINE="configs/experiments/v6_luar_frozen.yaml"
+FROZEN_SYN="configs/experiments/v6_luar_frozen_syn.yaml"
+LORA_BASELINE="configs/experiments/v6_luar_lora.yaml"
+LORA_SYN="configs/experiments/v6_luar_lora_syn.yaml"
 
 case "${1:-all}" in
-    luar)
-        EXPERIMENTS=("$LUAR_BASELINE" "$LUAR_SYN")
+    frozen)
+        EXPERIMENTS=("$FROZEN_BASELINE" "$FROZEN_SYN")
         ;;
-    roberta)
-        EXPERIMENTS=("$ROBERTA_BASELINE" "$ROBERTA_SYN")
+    lora)
+        EXPERIMENTS=("$LORA_BASELINE" "$LORA_SYN")
         ;;
     syn)
-        EXPERIMENTS=("$LUAR_SYN" "$ROBERTA_SYN")
+        EXPERIMENTS=("$FROZEN_SYN" "$LORA_SYN")
         ;;
     baseline|nosyn)
-        EXPERIMENTS=("$LUAR_BASELINE" "$ROBERTA_BASELINE")
+        EXPERIMENTS=("$FROZEN_BASELINE" "$LORA_BASELINE")
         ;;
     all|"")
         EXPERIMENTS=(
-            "$LUAR_BASELINE"
-            "$LUAR_SYN"
-            "$ROBERTA_BASELINE"
-            "$ROBERTA_SYN"
+            "$FROZEN_BASELINE"
+            "$FROZEN_SYN"
+            "$LORA_BASELINE"
+            "$LORA_SYN"
         )
         ;;
     *)
-        # Treat the argument as a single experiment name (with or without .yaml)
-        # and resolve it to configs/experiments/<name>.yaml.  Lets the user run
-        # exactly one of the four v5 configs without adding a named alias for it.
         candidate="$1"
         candidate="${candidate%.yaml}"
         cfg_path="configs/experiments/${candidate}.yaml"
@@ -87,14 +79,14 @@ case "${1:-all}" in
             EXPERIMENTS=("$cfg_path")
         else
             echo "Unknown subset or missing config: $1" >&2
-            echo "Usage: $0 [all|luar|roberta|syn|baseline|<exp_name>]" >&2
+            echo "Usage: $0 [all|frozen|lora|syn|baseline|<exp_name>]" >&2
             echo "Looked for: $cfg_path" >&2
             exit 2
         fi
         ;;
 esac
 
-# Pre-flight: synthetic dataset must exist for the syn runs.
+# Pre-flight: synthetic dataset must exist for any *_syn run.
 NEEDS_SYN=0
 for cfg in "${EXPERIMENTS[@]}"; do
     case "$cfg" in *_syn.yaml) NEEDS_SYN=1 ;; esac
@@ -115,8 +107,6 @@ else
     BOLD=""; DIM=""; CYAN=""; GREEN=""; YELLOW=""; RED=""; RESET=""
 fi
 
-# Pull the model display name from the YAML's encoder.model_name_or_path so
-# the banner reflects what's actually being trained, not just the config stem.
 model_name_for() {
     local cfg="$1"
     local name
@@ -140,7 +130,7 @@ fmt_duration() {
 BAR="────────────────────────────────────────────────────────────────────"
 TOTAL=${#EXPERIMENTS[@]}
 
-printf '\n%s%s V5 ablation suite %s— %d experiment(s)%s\n' \
+printf '\n%s%s V6 ablation suite %s— %d experiment(s)%s\n' \
     "$BOLD" "$CYAN" "$RESET$BOLD" "$TOTAL" "$RESET"
 printf '%s%s%s\n' "$DIM" "$BAR" "$RESET"
 i=0
@@ -197,12 +187,10 @@ echo "Compare runs in W&B side-by-side on these axes:"
 echo "  auc/genuine_vs_other"
 echo "  auc/genuine_vs_synthetic                   <-- the hard-negative number"
 echo "  score/synthetic_harder_than_other          <-- positive ⇒ syn is harder than other-sender (good)"
-echo "  threshold_0.95/precision"
-echo "  threshold_0.95/fpr_synthetic               <-- low ⇒ high-confidence verdicts resist LLM mimicry"
-echo "  coverage/at_acc_0.95"
+echo "  coverage/at_acc_0.95                       <-- selective coverage (scale-free)"
 echo "  embedding/pair_auroc                       <-- sender-disjoint generalization on val batches"
+echo "  early_stopped_at_epoch                     <-- which runs hit the patience limit"
 echo "  test/auc, test/eer                         <-- final headline numbers"
 echo ""
-echo "Then run the deeper post-hoc probe on the best checkpoint:"
-echo "  python scripts/score_centroids.py --run runs/<exp>/<ts> \\"
-echo "      --include-synthetic data/synthetic/enron_synthetic --wandb"
+echo "NOTE: threshold_0.95/* is unreachable under the current PrototypicalHead"
+echo "score mapping (score = 1 - z/3); use coverage/at_acc_0.95 for high-confidence behaviour."

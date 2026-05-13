@@ -191,11 +191,17 @@ class SyntheticBalancedSampler(Sampler[list[int]]):
                 self._eligible_pairs.append((real_sid, syn_sid))
 
         # Real-only senders: real senders that do NOT have a synthetic counterpart.
-        # These fill the remaining P - 2*n_syn slots per batch.
+        # These primarily fill the remaining P - 2*n_syn slots per batch.
         paired_real = {real for real, _ in self._eligible_pairs}
         self._eligible_real_only: list[str] = [
             sid for sid in real_senders if sid not in paired_real and _eligible(sid)
         ]
+        # Fallback pool: when there aren't enough true real-only senders to fill the
+        # filler slots, paired senders may also be drawn as fillers (solo, without
+        # their __syn twin). Tracked separately from _eligible_real_only so analysis
+        # code can still distinguish "filled by true real-only" vs "filled by a
+        # paired sender acting solo".
+        self._eligible_paired_real: list[str] = sorted(paired_real)
 
         slots_real_only = p - 2 * n_syn
         if len(self._eligible_pairs) < n_syn:
@@ -204,27 +210,73 @@ class SyntheticBalancedSampler(Sampler[list[int]]):
                 f"synthetic–real pairs; only {len(self._eligible_pairs)} qualify "
                 f"(both sender and its __syn counterpart need >= k={k} emails)."
             )
-        if len(self._eligible_real_only) < slots_real_only:
+        # Total filler-eligible senders = real-only + paired-real (used as solo fallback).
+        # Each batch consumes n_syn pairs, so up to n_syn paired senders are already
+        # spoken for and cannot also serve as fillers in that batch. We need enough
+        # remaining capacity to fill slots_real_only.
+        total_filler_pool = len(self._eligible_real_only) + len(self._eligible_paired_real)
+        if total_filler_pool < slots_real_only + n_syn:
             raise ValueError(
-                f"SyntheticBalancedSampler needs {slots_real_only} real-only senders "
-                f"(p - 2*n_syn = {p} - {2 * n_syn}) but only "
-                f"{len(self._eligible_real_only)} qualify."
+                f"SyntheticBalancedSampler needs at least {slots_real_only + n_syn} "
+                f"filler-eligible senders (slots_real_only={slots_real_only} + "
+                f"n_syn={n_syn} reserved as pairs); only {total_filler_pool} qualify."
             )
 
         self._sender_to_indices = dict(sender_to_indices)
+        # Per-epoch composition telemetry. Populated by __iter__ as it runs; the
+        # trainer pulls it after each epoch via pop_epoch_stats() and logs to W&B.
+        # Why expose this: when no true real-only senders exist (or too few), the
+        # filler slots fall back to paired senders drawn solo, which means a paired
+        # sender's per-epoch exposure splits between two roles. This counter makes
+        # that split observable instead of hidden behind RNG.
+        self._real_only_pool_size = len(self._eligible_real_only)
+        self._paired_real_pool_size = len(self._eligible_paired_real)
+        self._epoch_stats: dict[str, float] = {}
 
     def __iter__(self):
         pairs = list(self._eligible_pairs)
-        real_only = list(self._eligible_real_only)
         self._rng.shuffle(pairs)
-        self._rng.shuffle(real_only)
 
         slots_real_only = self.p - 2 * self.n_syn
-        n_batches = min(len(pairs) // self.n_syn, len(real_only) // slots_real_only)
+        # When the true real-only pool is too small we draw the remainder from
+        # paired senders, used solo (their __syn twin is not added to the batch).
+        # Per-batch we exclude that batch's chosen pair-reals from the filler
+        # candidates to prevent any sender from appearing twice in one batch.
+        n_batches = len(pairs) // self.n_syn if self.n_syn > 0 else 0
+
+        real_only_set = set(self._eligible_real_only)
+        # Reset accumulators at the start of each epoch.
+        n_filler_real_only = 0
+        n_filler_paired_solo = 0
+        n_filler_total = 0
+        # Exposure tracking — how many times each sender appeared in each role.
+        from collections import Counter as _Counter
+        exposure_as_pair: _Counter = _Counter()
+        exposure_as_filler: _Counter = _Counter()
 
         for i in range(n_batches):
             batch_pairs = pairs[i * self.n_syn : (i + 1) * self.n_syn]
-            batch_real = real_only[i * slots_real_only : (i + 1) * slots_real_only]
+            chosen_pair_reals = {real for real, _ in batch_pairs}
+
+            filler_candidates = list(self._eligible_real_only) + [
+                sid for sid in self._eligible_paired_real
+                if sid not in chosen_pair_reals
+            ]
+            self._rng.shuffle(filler_candidates)
+            batch_real = filler_candidates[:slots_real_only]
+            if len(batch_real) < slots_real_only:
+                # Should be impossible given the constructor check, but guard anyway.
+                break
+
+            for sid in batch_real:
+                if sid in real_only_set:
+                    n_filler_real_only += 1
+                else:
+                    n_filler_paired_solo += 1
+                exposure_as_filler[sid] += 1
+            n_filler_total += len(batch_real)
+            for real_sid, _syn_sid in batch_pairs:
+                exposure_as_pair[real_sid] += 1
 
             # Interleave: real counterpart immediately before its synthetic twin so
             # episode_collate assigns them adjacent batch-local labels (cosmetic only,
@@ -242,9 +294,39 @@ class SyntheticBalancedSampler(Sampler[list[int]]):
 
             yield indices
 
-    def __len__(self) -> int:
-        slots_real_only = self.p - 2 * self.n_syn
-        return min(
-            len(self._eligible_pairs) // self.n_syn,
-            len(self._eligible_real_only) // slots_real_only,
+        # Stash epoch composition so the trainer can log it. Keys are flat so they
+        # can be merged directly into the W&B step dict.
+        fallback_frac = (
+            n_filler_paired_solo / n_filler_total if n_filler_total else 0.0
         )
+        # "Pair-only" exposure: senders that played the pair role but never appeared
+        # solo as a filler. When the fallback is heavy this number drops.
+        pair_only_senders = sum(
+            1 for s in exposure_as_pair if exposure_as_filler.get(s, 0) == 0
+        )
+        self._epoch_stats = {
+            "train/sampler/n_batches": float(n_batches),
+            "train/sampler/n_filler_real_only": float(n_filler_real_only),
+            "train/sampler/n_filler_paired_solo": float(n_filler_paired_solo),
+            "train/sampler/filler_fallback_fraction": float(fallback_frac),
+            "train/sampler/pool_real_only": float(self._real_only_pool_size),
+            "train/sampler/pool_paired_real": float(self._paired_real_pool_size),
+            "train/sampler/pair_only_senders": float(pair_only_senders),
+        }
+
+    def pop_epoch_stats(self) -> dict[str, float]:
+        """Return the most recent epoch's composition stats and reset.
+
+        Trainer calls this after exhausting the DataLoader for one epoch to merge
+        sampler telemetry into the W&B step dict. Returning a fresh dict (and
+        clearing self) means double-calls or skipped epochs don't double-log.
+        """
+        stats = dict(self._epoch_stats)
+        self._epoch_stats = {}
+        return stats
+
+    def __len__(self) -> int:
+        # Limit is now just the pair pool, since fillers can always be drawn from
+        # (real_only ∪ paired_real \ this_batch's_pair_reals), and the constructor
+        # ensures that combined pool is large enough.
+        return len(self._eligible_pairs) // self.n_syn if self.n_syn > 0 else 0
