@@ -1,0 +1,51 @@
+# V5 ablation — LUAR + LoRA + projection head (SupCon, episode pooling)
+#
+# Re-run of v2_luar_lora with v5 naming for direct comparison against
+# v5_luar_lora_syn within this suite.  Hyperparameters are unchanged from V2.
+
+encoder:
+  model_name_or_path: rrivera1849/LUAR-MUD
+  pooling: luar_episode
+  freeze_backbone: false
+  lora:
+    r: 16
+    alpha: 32
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+  episode_k: 4
+  trust_remote_code: true
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+
+training:
+  epochs: 20
+  batch_size: 64
+  lr: 2.0e-4
+  scheduler: cosine
+  warmup_steps: 200
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v5_luar_lora
+  tags:
+    - luar
+    - lora
+    - projection
+    - supcon
+    - episode-pooling
+    - no-synthetic
+    - v5-ablation
+  notes: "V5 ablation baseline: LUAR-MUD + LoRA (r=16) + projection, no synthetic augmentation. Paired with v5_luar_lora_syn."

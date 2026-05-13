@@ -1,0 +1,51 @@
+# V5 ablation — RoBERTa + LoRA + projection + synthetic hard negatives
+#
+# Re-run of v4_roberta_lora_syn with v5 naming for direct comparison against
+# v5_roberta_lora within this suite.  Hyperparameters are unchanged from V4.
+
+encoder:
+  model_name_or_path: roberta-base
+  pooling: mean
+  freeze_backbone: false
+  lora:
+    r: 8
+    alpha: 16
+    target_modules:
+      - query
+      - value
+    dropout: 0.05
+  max_length: 512
+  projection_dim: 128
+
+loss:
+  name: supcon
+  temperature: 0.07
+
+data:
+  train_senders: 100
+  emails_per_sender_k: 8
+  val_split: 0.1
+  test_split: 0.1
+  augmentation:
+    synthetic_path: data/synthetic/enron_synthetic
+    n_syn_per_batch: 2
+
+training:
+  epochs: 40
+  batch_size: 64
+  lr: 5.0e-5
+  scheduler: cosine
+  warmup_steps: 500
+  grad_clip: 1.0
+  mixed_precision: true
+
+wandb:
+  name: v5_roberta_lora_syn
+  tags:
+    - roberta-base
+    - lora
+    - projection
+    - supcon
+    - synthetic-hard-negatives
+    - v5-ablation
+  notes: "V5 ablation: RoBERTa + LoRA (lr=5e-5, r=8, 40 ep) + synthetic hard negatives (n_syn=2). Paired with v5_roberta_lora as the no-synthetic control."
